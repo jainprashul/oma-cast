@@ -6,6 +6,10 @@
 
 **Oma Cast** (`io.github.jainprashul.omacast`) is a bar widget and popup panel for **Omarchy Linux** and **Hyprland**. It controls [FluxCast](https://github.com/IlyaP358/fluxcast) from the status bar so you can scan nearby TVs, pick a monitor, and start or stop screen mirroring in one click.
 
+<p align="center">
+  <img src="infographic.png" alt="Oma Cast overview — core workflow, protocols, monitor picker, IPC contract, and FluxCast diagnostics" width="900" />
+</p>
+
 ---
 
 ## ✨ Features
@@ -19,6 +23,10 @@
 * **🔔 Live Session Status:** Connecting / casting states, elapsed time, desktop notifications, and a 1-click stop action.
 * **🩺 FluxCast Diagnostics:** Runs `fluxcast --doctor-json` on open/refresh, surfaces missing dependencies, and can fall back to the FluxCast tray.
 * **🪟 Hyprland + Omarchy IPC:** Bar clicks plus `oma-cast.*` IPC handlers for toggle, scan, start, stop, and refresh.
+
+<p align="center">
+  <img src="product.jpg" alt="Oma Cast panel — scan receivers, pick a monitor, start or stop casting" width="900" />
+</p>
 
 ---
 
