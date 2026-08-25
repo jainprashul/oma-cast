@@ -67,12 +67,61 @@ Panel {
   readonly property var selectedMonitor: Model.monitorByKey(monitors, selectedMonitorKey)
   readonly property string displayState: errorState ? "error" : currentState
   readonly property var protocolOptions: [
-    { id: "wfd", label: "Miracast / WFD" },
+    { id: "wfd", label: "Miracast" },
     { id: "dlna", label: "DLNA" },
     { id: "chromecast", label: "Chromecast" }
   ]
 
-  readonly property int contentItemCount: devices.length + monitors.length
+  readonly property bool isLiveSession: currentState === "casting" || currentState === "connecting"
+  readonly property bool isScanning: currentState === "scanning" || scanInFlight
+  readonly property bool isBlocked: !fluxcastAvailable && !isLiveSession
+  readonly property bool isSetupPhase: !isLiveSession && !isBlocked
+  readonly property bool canPickMonitor: monitors.length > 1
+  readonly property bool hasDevice: selectedDevice !== null
+  readonly property bool canStartCast: isSetupPhase && hasDevice && selectedMonitor !== null && !isScanning && !startInFlight
+  readonly property bool primaryBusy: scanInFlight || startInFlight || stopInFlight
+
+  readonly property string statusHeadline: {
+    if (isBlocked) return fluxcastDiagnostic !== "" ? fluxcastDiagnostic : "FluxCast unavailable"
+    if (displayState === "error") return lastError !== "" ? lastError : "Casting failed"
+    if (isScanning) return "Looking for displays…"
+    if (currentState === "connecting") return "Connecting…"
+    if (currentState === "casting") return currentTarget !== "" ? currentTarget : "Casting"
+    if (!hasDevice) return "Choose a TV"
+    return "Ready to cast"
+  }
+
+  readonly property string statusDetail: {
+    if (isBlocked) return lastErrorHint !== "" ? lastErrorHint : "Check dependencies or open the FluxCast tray."
+    if (displayState === "error" && lastErrorHint !== "") return lastErrorHint
+    if (isLiveSession) {
+      var parts = [Model.protocolLabel(currentProtocol)]
+      if (currentMonitor !== "") parts.push(currentMonitor)
+      if (currentState === "casting") parts.push(Model.formatElapsed(elapsedSeconds))
+      return parts.join(" · ")
+    }
+    if (isScanning) return "Put the TV in Screen Share or Wireless Display mode."
+    if (!hasDevice) return devices.length === 0 ? "Scan to find nearby receivers." : "Select a device below."
+    var monitorName = selectedMonitor ? Model.monitorLabel(selectedMonitor) : ""
+    return monitorName !== "" ? monitorName + " · " + Model.protocolLabel(selectedProtocol) : Model.protocolLabel(selectedProtocol)
+  }
+
+  readonly property string primaryLabel: {
+    if (primaryBusy) {
+      if (stopInFlight) return "Stopping…"
+      if (startInFlight) return "Starting…"
+      return "Scanning…"
+    }
+    if (isLiveSession) return "Stop casting"
+    if (isBlocked) return launchTrayFallback ? "Open tray" : "Retry"
+    if (!hasDevice || devices.length === 0) return Model.buildScanArgs(selectedProtocol, fluxcastBin) ? "Find TVs" : "Open tray"
+    return "Start cast"
+  }
+
+  readonly property bool primaryEnabled: !primaryBusy && (isLiveSession || isBlocked || isSetupPhase)
+
+  readonly property color contentForeground: barForeground
+  readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
 
   function expandPath(path) {
     var value = Model.normalizeText(path)
@@ -402,6 +451,25 @@ Panel {
     })
   }
 
+  function primaryAction() {
+    if (!primaryEnabled) return
+    if (isLiveSession) {
+      stop()
+      return
+    }
+    if (isBlocked) {
+      if (launchTrayFallback) launchTray()
+      else refresh()
+      return
+    }
+    if (!hasDevice || devices.length === 0 || !Model.buildScanArgs(selectedProtocol, fluxcastBin)) {
+      if (Model.buildScanArgs(selectedProtocol, fluxcastBin)) scan()
+      else if (launchTrayFallback) launchTray()
+      return
+    }
+    start()
+  }
+
   function open() {
     root.controller.show()
     refresh()
@@ -417,7 +485,7 @@ Panel {
   }
 
   function switchPanel(direction) {
-    if (root.bar && typeof root.bar.switchPanelFrom === "function")
+    if (root.bar && typeof root.brar.switchPanelFrom === "function")
       return root.bar.switchPanelFrom(root.hostWidget || root, direction)
     return false
   }
@@ -432,6 +500,13 @@ Panel {
   }
 
   onSettingsChanged: syncFromSettings()
+
+  onSelectedProtocolChanged: {
+    if (devices.length > 0) {
+      devices = []
+      selectedDeviceKey = ""
+    }
+  }
 
   Timer {
     id: connectingTimer
@@ -549,8 +624,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(440))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(620))
+    contentWidth: panel.fittedContentWidth(Style.space(400))
+    contentHeight: panel.fittedContentHeight(panelScroll.contentHeight, Style.space(520))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -558,262 +633,359 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: content
-        width: parent.width
-        spacing: Style.space(10)
+      Flickable {
+        id: panelScroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
 
-        Row {
+        Column {
+          id: content
           width: parent.width
-          spacing: Style.space(8)
+          spacing: Style.space(12)
 
-          Text {
-            text: Model.iconForState(root.currentState)
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.displaySmall
-          }
-
-          Column {
-            width: parent.width - (Style.space(28))
-            spacing: 2
+          // ---- Hero -------------------------------------------------------
+          Item {
+            width: parent.width
+            height: Math.max(heroIcon.implicitHeight, heroText.implicitHeight)
 
             Text {
-              width: parent.width
-              text: root.fluxcastAvailable ? "FluxCast ready" : (root.fluxcastDiagnostic !== "" ? root.fluxcastDiagnostic : "FluxCast unavailable")
-              color: root.barForeground
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
-              wrapMode: Text.WordWrap
+              id: heroIcon
+              text: Model.iconForState(root.displayState)
+              color: root.contentForeground
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.fontPx(2.2)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
             }
 
-            Text {
-              width: parent.width
-              text: Model.statusSummary(root.currentState, root.currentProtocol, root.currentTarget, root.currentMonitor, root.elapsedSeconds)
-              color: root.barForeground
-              opacity: 0.8
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-        }
+            Column {
+              id: heroText
+              anchors.left: heroIcon.right
+              anchors.leftMargin: Style.space(10)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
 
-        Flow {
-          width: parent.width
-          spacing: Style.space(6)
+              Text {
+                width: parent.width
+                text: root.statusHeadline
+                color: root.contentForeground
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+                wrapMode: Text.WordWrap
+                elide: Text.ElideRight
+                maximumLineCount: 2
+              }
 
-          Repeater {
-            model: root.protocolOptions
-
-            delegate: Button {
-              selected: root.selectedProtocol === modelData.id
-              bordered: true
-              foreground: root.barForeground
-              text: modelData.label
-              onClicked: {
-                root.selectedProtocol = modelData.id
-                root.persistSettings({ protocol: modelData.id })
+              Text {
+                width: parent.width
+                text: root.statusDetail
+                color: root.contentForeground
+                opacity: 0.72
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+                elide: Text.ElideRight
+                maximumLineCount: 2
               }
             }
           }
-        }
 
-        Text {
-          width: parent.width
-          text: "Devices"
-          color: root.barForeground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          font.bold: true
-        }
-
-        ScrollView {
-          width: parent.width
-          height: Math.min(Style.space(180), devicesColumn.implicitHeight + Style.space(12))
-
-          Column {
-            id: devicesColumn
+          // ---- Error banner -----------------------------------------------
+          Rectangle {
+            visible: root.lastError !== "" && root.displayState === "error"
             width: parent.width
-            spacing: Style.space(6)
+            radius: Style.space(8)
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.08)
+            border.color: Color.urgent
+            border.width: 1
+            implicitHeight: errorColumn.implicitHeight + Style.space(12)
 
-            Repeater {
-              model: root.devices
+            Column {
+              id: errorColumn
+              anchors.fill: parent
+              anchors.margins: Style.space(6)
+              spacing: Style.space(2)
 
-              delegate: Button {
+              Text {
                 width: parent.width
-                leftAlign: true
-                selected: Model.deviceKey(modelData) === root.selectedDeviceKey
-                bordered: true
-                foreground: root.barForeground
-                text: Model.deviceLabel(modelData)
-                onClicked: root.selectedDeviceKey = Model.deviceKey(modelData)
+                text: root.lastErrorHint !== "" ? root.lastErrorHint : "Try scanning again or inspect the FluxCast log."
+                color: root.contentForeground
+                opacity: 0.85
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
               }
             }
+          }
 
-            Text {
-              visible: root.devices.length === 0
-              width: parent.width
-              text: root.scanInFlight ? "Scanning for Miracast devices..." : "No devices found"
-              color: root.barForeground
-              opacity: 0.75
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+          // ---- Live session card ------------------------------------------
+          Rectangle {
+            visible: root.isLiveSession
+            width: parent.width
+            radius: Style.space(8)
+            color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.06)
+            border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.14)
+            border.width: 1
+            implicitHeight: liveColumn.implicitHeight + Style.space(14)
+
+            Column {
+              id: liveColumn
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  text: "󰒋"
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.body
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                  width: parent.width - Style.space(24)
+                  spacing: 1
+
+                  Text {
+                    width: parent.width
+                    text: root.currentTarget !== "" ? root.currentTarget : "Receiver"
+                    color: root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: (root.currentMonitor !== "" ? root.currentMonitor : "Display") + " · " + Model.protocolLabel(root.currentProtocol)
+                    color: root.contentForeground
+                    opacity: 0.7
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+
+              Text {
+                visible: root.currentState === "casting"
+                width: parent.width
+                text: Model.formatElapsed(root.elapsedSeconds)
+                color: Color.accent
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
             }
           }
-        }
 
-        Text {
-          width: parent.width
-          text: "Monitors"
-          color: root.barForeground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          font.bold: true
-        }
-
-        ScrollView {
-          width: parent.width
-          height: Math.min(Style.space(160), monitorsColumn.implicitHeight + Style.space(12))
-
+          // ---- Setup: protocol + devices + monitor ------------------------
           Column {
-            id: monitorsColumn
+            visible: root.isSetupPhase
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(10)
 
-            Repeater {
-              model: root.monitors
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+              visible: !root.isScanning
 
-              delegate: Button {
+              Text {
                 width: parent.width
-                leftAlign: true
-                selected: Model.monitorKey(modelData) === root.selectedMonitorKey
-                bordered: true
-                foreground: root.barForeground
-                text: Model.monitorLabel(modelData)
-                onClicked: {
-                  root.selectedMonitorKey = Model.monitorKey(modelData)
-                  root.persistSettings({ monitor: Model.monitorKey(modelData) })
+                text: "Protocol"
+                color: root.contentForeground
+                opacity: 0.65
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: root.protocolOptions
+
+                  delegate: Button {
+                    selected: root.selectedProtocol === modelData.id
+                    bordered: true
+                    foreground: root.contentForeground
+                    text: modelData.label
+                    onClicked: {
+                      if (root.selectedProtocol === modelData.id) return
+                      root.selectedProtocol = modelData.id
+                      root.persistSettings({ protocol: modelData.id })
+                    }
+                  }
                 }
               }
             }
 
-            Text {
-              visible: root.monitors.length === 0
+            Column {
               width: parent.width
-              text: "No monitors detected"
-              color: root.barForeground
-              opacity: 0.75
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-        }
+              spacing: Style.space(6)
 
-        Flow {
-          width: parent.width
-          spacing: Style.space(6)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
 
-          Button {
-            text: root.scanInFlight ? "Scanning" : "Scan"
-            enabled: !root.scanInFlight
-            onClicked: root.scan()
-          }
+                Text {
+                  text: "Receivers"
+                  color: root.contentForeground
+                  opacity: 0.65
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                }
 
-          Button {
-            text: "Refresh"
-            onClicked: root.refresh()
-          }
+                Item { width: Style.space(4); height: 1 }
 
-          Button {
-            text: root.startInFlight ? "Starting" : "Start"
-            enabled: !root.startInFlight
-            onClicked: root.start()
-          }
+                Button {
+                  id: rescanBtn
+                  iconText: "󰑐"
+                  tooltipText: root.isScanning ? "Scanning…" : "Scan again"
+                  bordered: true
+                  foreground: root.contentForeground
+                  iconSpinning: root.isScanning
+                  opacity: root.isScanning ? 0.6 : 1
+                  anchors.verticalCenter: parent.verticalCenter
+                  onClicked: {
+                    if (!root.isScanning) root.scan()
+                  }
+                }
+              }
 
-          Button {
-            text: root.stopInFlight ? "Stopping" : "Stop"
-            enabled: root.currentState === "casting" || root.currentState === "connecting"
-            onClicked: root.stop()
-          }
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
 
-          Button {
-            text: "Open log"
-            onClicked: root.openLog()
-          }
+                Repeater {
+                  model: root.devices
 
-          Button {
-            visible: root.launchTrayFallback
-            text: "Launch tray"
-            onClicked: root.launchTray()
-          }
-        }
+                  delegate: Button {
+                    width: parent.width
+                    leftAlign: true
+                    selected: Model.deviceKey(modelData) === root.selectedDeviceKey
+                    bordered: true
+                    foreground: root.contentForeground
+                    text: Model.deviceLabel(modelData)
+                    onClicked: root.selectedDeviceKey = Model.deviceKey(modelData)
+                  }
+                }
 
-        Column {
-          width: parent.width
-          spacing: 2
-
-          Text {
-            width: parent.width
-            text: "Current target: " + (root.currentTarget !== "" ? root.currentTarget : "None")
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            width: parent.width
-            text: "Current monitor: " + (root.currentMonitor !== "" ? root.currentMonitor : "None")
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            width: parent.width
-            text: "Elapsed: " + Model.formatElapsed(root.elapsedSeconds)
-            color: root.barForeground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-        }
-
-        Rectangle {
-          visible: root.lastError !== ""
-          width: parent.width
-          radius: Style.space(8)
-          color: "transparent"
-          border.color: Color.urgent
-          border.width: 1
-
-          Column {
-            anchors.fill: parent
-            anchors.margins: Style.space(6)
-            spacing: 2
-
-            Text {
-              width: parent.width
-              text: root.lastError
-              color: Color.urgent
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+                Text {
+                  visible: root.devices.length === 0
+                  width: parent.width
+                  text: root.isScanning
+                    ? "Scanning for nearby TVs…"
+                    : (Model.buildScanArgs(root.selectedProtocol, root.fluxcastBin)
+                      ? "No receivers yet. Tap Find TVs to scan."
+                      : "Use the tray to discover DLNA or Chromecast devices.")
+                  color: root.contentForeground
+                  opacity: 0.6
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+              }
             }
 
-            Text {
-              visible: root.lastErrorHint !== ""
+            Column {
+              visible: root.canPickMonitor
               width: parent.width
-              text: root.lastErrorHint
-              color: root.barForeground
-              opacity: 0.8
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+              spacing: Style.space(6)
+
+              Text {
+                width: parent.width
+                text: "Screen"
+                color: root.contentForeground
+                opacity: 0.65
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: root.monitors
+
+                  delegate: Button {
+                    selected: Model.monitorKey(modelData) === root.selectedMonitorKey
+                    bordered: true
+                    foreground: root.contentForeground
+                    text: Model.monitorLabel(modelData)
+                    onClicked: {
+                      root.selectedMonitorKey = Model.monitorKey(modelData)
+                      root.persistSettings({ monitor: Model.monitorKey(modelData) })
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            width: parent.width
+            foreground: root.contentForeground
+          }
+
+          // ---- Primary action + secondary links ---------------------------
+          Button {
+            width: parent.width
+            leftAlign: true
+            bordered: true
+            active: root.isLiveSession
+            selected: root.isLiveSession
+            foreground: root.isLiveSession ? Color.urgent : root.contentForeground
+            text: root.primaryLabel
+            opacity: root.primaryEnabled ? 1 : 0.45
+            onClicked: root.primaryAction()
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              visible: root.launchTrayFallback
+              text: "Tray"
+              bordered: true
+              foreground: root.contentForeground
+              onClicked: root.launchTray()
+            }
+
+            Button {
+              text: "Log"
+              bordered: true
+              foreground: root.contentForeground
+              onClicked: root.openLog()
+            }
+
+            Button {
+              visible: root.isSetupPhase
+              text: "Refresh"
+              bordered: true
+              foreground: root.contentForeground
+              opacity: root.doctorInFlight || root.monitorsInFlight ? 0.5 : 1
+              onClicked: {
+                if (!root.doctorInFlight && !root.monitorsInFlight) root.refresh()
+              }
             }
           }
         }

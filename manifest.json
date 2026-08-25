@@ -1,20 +1,25 @@
 {
   "schemaVersion": 1,
-  "id": "oma-cast",
+  "id": "io.github.jainprashul.omacast",
   "name": "Oma Cast",
   "version": "0.1.0",
-  "author": "",
-  "license": "GPL-3.0-or-later",
-  "description": "Control FluxCast screen mirroring from the Omarchy bar",
+  "author": "Prashul Jain",
+  "license": "MIT",
+  "description": "Control OmaCast screen mirroring from the Omarchy bar",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Oma Cast",
+    "displayName": "Wireless Displays",
     "description": "Screen mirroring and casting",
     "category": "Media",
     "allowMultiple": false,
-    "defaultSection": "center"
-  }
+    "defaultSection": "center",
+    "allowedSections": ["center", "left", "right"],
+    "aliases": ["oma-cast", "oma-cast-bar", "screen-mirror" , "screen-cast" , "wireless-display" , "wireless-screen-cast", "cast-to-tv" , "cast-to-screen" , "oma-mirror", "display-mirror", "wireless-display-bar", "wireless-display-bar-widget"]
+  },
+  "permissions": [
+    "system.display"
+  ]
 }
