@@ -115,4 +115,46 @@ assert.strictEqual(
   "only an explicit exit leaves the connected state"
 )
 
+assert.strictEqual(
+  Model.barIconVisible(false, "unavailable"),
+  true,
+  "bar icon must stay visible so FluxCast can be opened while unavailable"
+)
+
+assert.strictEqual(
+  Model.barIconVisible(false, "idle"),
+  true,
+  "bar icon stays visible when idle"
+)
+
+assert.notStrictEqual(
+  Model.iconForState("unavailable"),
+  "",
+  "unavailable still has a bar glyph"
+)
+
+assert.strictEqual(
+  Model.iconForState("idle"),
+  "󰄘",
+  "idle uses the Chromecast-style cast glyph, not the leftover arrow circle"
+)
+
+assert.notStrictEqual(
+  Model.iconForState("idle"),
+  "󰁐",
+  "idle must not keep the arrow-circle glyph"
+)
+
+assert.strictEqual(
+  Model.resolveSessionState({
+    currentState: "unavailable",
+    running: false,
+    sessionReady: false,
+    fluxcastAvailable: true,
+    action: "poll"
+  }),
+  "idle",
+  "successful doctor must leave unavailable so the idle icon can show"
+)
+
 console.log("ok")

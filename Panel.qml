@@ -47,6 +47,7 @@ Panel {
   property bool protocolWarningShown: false
   property bool dependencyNotificationShown: false
   property bool stopRequested: false
+  property bool sessionReady: false
   property string doctorRaw: ""
   property string statusRaw: ""
   property string devicesRaw: ""
@@ -72,8 +73,8 @@ Panel {
     { id: "chromecast", label: "Chromecast" }
   ]
 
-  readonly property bool isLiveSession: currentState === "casting" || currentState === "connecting"
-  readonly property bool isScanning: currentState === "scanning" || scanInFlight
+  readonly property bool isLiveSession: currentState === "casting" || currentState === "connecting" || startInFlight || sessionReady
+  readonly property bool isScanning: !isLiveSession && (currentState === "scanning" || scanInFlight)
   readonly property bool isBlocked: !fluxcastAvailable && !isLiveSession
   readonly property bool isSetupPhase: !isLiveSession && !isBlocked
   readonly property bool canPickMonitor: monitors.length > 1
@@ -84,8 +85,8 @@ Panel {
   readonly property string statusHeadline: {
     if (isBlocked) return fluxcastDiagnostic !== "" ? fluxcastDiagnostic : "FluxCast unavailable"
     if (displayState === "error") return lastError !== "" ? lastError : "Casting failed"
-    if (currentState === "connecting") return "Connecting…"
-    if (currentState === "casting") return currentTarget !== "" ? currentTarget : "Casting"
+    if (currentState === "connecting" && !sessionReady) return "Connecting…"
+    if (currentState === "casting" || sessionReady) return currentTarget !== "" ? currentTarget : "Casting"
     if (isScanning) return "Looking for displays…"
     if (!hasDevice) return "Choose a TV"
     return "Ready to cast"
@@ -112,18 +113,18 @@ Panel {
   }
 
   readonly property string primaryLabel: {
+    if (stopInFlight) return "Stopping…"
+    if (isLiveSession) return "Stop casting"
     if (primaryBusy) {
-      if (stopInFlight) return "Stopping…"
       if (startInFlight) return "Starting…"
       return "Scanning…"
     }
-    if (isLiveSession) return "Stop casting"
     if (isBlocked) return launchTrayFallback ? "Open tray" : "Retry"
     if (!hasDevice || devices.length === 0) return Model.buildScanArgs(selectedProtocol, fluxcastBin) ? "Find TVs" : "Open tray"
     return "Start cast"
   }
 
-  readonly property bool primaryEnabled: !primaryBusy && (isLiveSession || isBlocked || isSetupPhase)
+  readonly property bool primaryEnabled: (isLiveSession && !stopInFlight) || (!primaryBusy && (isBlocked || isSetupPhase))
 
   readonly property color contentForeground: barForeground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
@@ -201,30 +202,23 @@ Panel {
     monitorProc.running = true
   }
 
+  function sessionSnapshot(action) {
+    return {
+      currentState: currentState,
+      running: startProc.running === true,
+      startInFlight: startInFlight,
+      sessionReady: sessionReady,
+      fluxcastAvailable: fluxcastAvailable,
+      errorState: errorState,
+      action: action || "poll"
+    }
+  }
+
   function applyLocalStatus() {
     var running = startProc.running === true
-    var previousState = currentState
-
-    if (!fluxcastAvailable && !running && !startInFlight) {
-      if (previousState !== "error") currentState = "unavailable"
-      return
-    }
-
-    if (running || startInFlight) {
-      errorState = false
-      if (currentState !== "casting") currentState = "connecting"
-      if (currentState === "casting") elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
-      return
-    }
-
-    if (previousState === "casting" || previousState === "connecting") {
-      currentTarget = ""
-      currentMonitor = ""
-      currentPid = 0
-      elapsedSeconds = 0
-    }
-    if (!errorState && !startInFlight && !scanInFlight)
-      currentState = fluxcastAvailable ? "idle" : "unavailable"
+    currentState = Model.resolveSessionState(sessionSnapshot("poll"))
+    if (currentState === "casting") elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
+    if (running || startInFlight || sessionReady) errorState = false
   }
 
   function scan() {
@@ -243,7 +237,7 @@ Panel {
 
     scanInFlight = true
     scanQueued = false
-    currentState = "scanning"
+    currentState = Model.resolveSessionState(sessionSnapshot("scan"))
     scanProc.command = args
     scanProc.running = true
   }
@@ -304,6 +298,7 @@ Panel {
 
     clearError()
     startInFlight = true
+    sessionReady = false
     currentState = "connecting"
     currentTarget = Model.deviceLabel(device)
     currentMonitor = Model.monitorLabel(monitor)
@@ -322,8 +317,10 @@ Panel {
 
     if (result.available) {
       dependencyNotificationShown = false
-    } else {
-      if (currentState !== "unavailable" && currentState !== "idle") currentState = "unavailable"
+      if (!isLiveSession && !startProc.running && currentState === "unavailable")
+        currentState = "idle"
+    } else if (!isLiveSession && !startProc.running) {
+      currentState = Model.resolveSessionState(sessionSnapshot("doctor-fail"))
       if (result.message !== "") setError(result.message, result.hint)
       if (result.missing.length > 0 && showNotifications && !dependencyNotificationShown) {
         dependencyNotificationShown = true
@@ -343,9 +340,11 @@ Panel {
     monitors = result.monitors
     monitorsRaw = result.raw
     if (result.error !== "") {
-      errorState = true
-      currentState = "error"
-      setError(result.error, result.hint)
+      if (!isLiveSession && !startProc.running) {
+        errorState = true
+        currentState = "error"
+        setError(result.error, result.hint)
+      }
     }
     if (configuredMonitor !== "" && !selectedMonitor && !monitorWarningShown) {
       monitorWarningShown = true
@@ -363,10 +362,12 @@ Panel {
     devices = result.devices
     devicesRaw = result.raw
     if (result.error !== "") {
-      errorState = true
-      currentState = "error"
-      setError(result.error, result.hint)
-    } else if (!startProc.running && !startInFlight && currentState !== "connecting" && currentState !== "casting") {
+      if (!isLiveSession && !startProc.running) {
+        errorState = true
+        currentState = "error"
+        setError(result.error, result.hint)
+      }
+    } else if (!isLiveSession && !startProc.running && !startInFlight) {
       currentState = fluxcastAvailable ? "idle" : "unavailable"
     }
     if (!selectedDevice && devices.length > 0) selectedDeviceKey = Model.deviceKey(devices[0])
@@ -383,8 +384,13 @@ Panel {
   }
 
   function onCastLogLine(line) {
-    if (!startProc.running || currentState !== "connecting") return
+    if (!startProc.running) return
     if (!Model.isSessionReadyLine(line)) return
+    if (sessionReady) {
+      currentState = "casting"
+      return
+    }
+    sessionReady = true
     currentState = "casting"
     sessionStartedAt = new Date()
     elapsedSeconds = 0
@@ -394,34 +400,32 @@ Panel {
   function onCastExited(exitCode, stderrText) {
     var wasStop = stopRequested
     stopRequested = false
+    sessionReady = false
     startInFlight = false
     stopInFlight = false
+    currentTarget = ""
+    currentMonitor = ""
+    currentPid = 0
+    elapsedSeconds = 0
+    sessionStartedAt = new Date(0)
 
     if (wasStop) {
       errorState = false
-      currentState = "idle"
-      currentTarget = ""
-      currentMonitor = ""
-      currentPid = 0
-      elapsedSeconds = 0
+      currentState = Model.resolveSessionState(sessionSnapshot("exit"))
       if (showNotifications) notify("Casting stopped", "FluxCast session ended")
-      applyLocalStatus()
       return
     }
 
     if (exitCode !== 0) {
       errorState = true
-      currentState = "error"
+      currentState = Model.resolveSessionState(sessionSnapshot("exit"))
       setError(Model.processFailureMessage("start", exitCode, stderrText), Model.recoveryHint("start"))
       if (showNotifications) notify("Casting failed", lastError)
       return
     }
 
-    currentState = fluxcastAvailable ? "idle" : "unavailable"
-    currentTarget = ""
-    currentMonitor = ""
-    currentPid = 0
-    elapsedSeconds = 0
+    errorState = false
+    currentState = Model.resolveSessionState(sessionSnapshot("exit"))
   }
 
   function openLog() {
@@ -510,7 +514,7 @@ Panel {
   }
 
   onOpenedChanged: {
-    if (opened && scanOnOpen) Qt.callLater(scan)
+    if (opened && scanOnOpen && !isLiveSession && !startProc.running) Qt.callLater(scan)
   }
 
   onSettingsChanged: syncFromSettings()

@@ -37,8 +37,12 @@ function iconForState(state) {
   if (value === "connecting") return "󰐊"
   if (value === "scanning") return "󰄬"
   if (value === "error") return "󰅙"
-  if (value === "idle") return "󰁐"
+  if (value === "idle") return "󰄘"
   return "󰅚"
+}
+
+function barIconVisible(opened, displayState) {
+  return true
 }
 
 function stateLabel(state) {
@@ -72,6 +76,28 @@ function isSessionReadyLine(line) {
   if (text.indexOf("output signal sent") !== -1) return true
   if (text.indexOf("hls source is producing segments") !== -1) return true
   return false
+}
+
+function resolveSessionState(input) {
+  var options = input || {}
+  var current = normalizeText(options.currentState) || "idle"
+  var running = !!options.running || !!options.startInFlight
+  var sessionReady = !!options.sessionReady
+  var available = !!options.fluxcastAvailable
+  var action = normalizeText(options.action) || "poll"
+  var live = current === "casting" || current === "connecting" || running || sessionReady
+
+  if (action === "exit") return options.errorState ? "error" : (available ? "idle" : "unavailable")
+
+  if (live && (action === "scan" || action === "doctor-fail" || action === "monitor-error" || action === "poll")) {
+    if (sessionReady || current === "casting") return "casting"
+    return running || current === "connecting" || options.startInFlight ? "connecting" : current
+  }
+
+  if (action === "scan") return "scanning"
+  if (options.errorState) return "error"
+  if (!available) return "unavailable"
+  return "idle"
 }
 
 function statusSummary(state, protocol, target, monitor, elapsedSeconds) {
@@ -486,9 +512,11 @@ if (typeof module !== "undefined") {
     normalizeProtocol: normalizeProtocol,
     protocolLabel: protocolLabel,
     iconForState: iconForState,
+    barIconVisible: barIconVisible,
     stateLabel: stateLabel,
     barTooltip: barTooltip,
     isSessionReadyLine: isSessionReadyLine,
+    resolveSessionState: resolveSessionState,
     statusSummary: statusSummary,
     formatElapsed: formatElapsed,
     safeJson: safeJson,

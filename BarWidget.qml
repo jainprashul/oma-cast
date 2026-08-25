@@ -14,7 +14,7 @@ BarWidget {
   readonly property string currentTarget: panelLoader.item ? panelLoader.item.currentTarget : ""
   readonly property string currentProtocol: panelLoader.item ? panelLoader.item.currentProtocol : "wfd"
   readonly property int currentElapsedSeconds: panelLoader.item ? panelLoader.item.elapsedSeconds : 0
-  readonly property bool visibleInBar: opened || displayState !== "unavailable"
+  readonly property bool visibleInBar: Model.barIconVisible(opened, displayState)
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()
