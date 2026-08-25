@@ -63,6 +63,17 @@ function barTooltip(state, target, protocol, elapsedSeconds) {
   return label + " · Open Oma Cast"
 }
 
+function isSessionReadyLine(line) {
+  var text = normalizeText(line).toLowerCase()
+  if (text === "") return false
+  if (text.indexOf("play accepted") !== -1) return true
+  if (text.indexOf("media stream started") !== -1) return true
+  if (text.indexOf("casting started") !== -1) return true
+  if (text.indexOf("output signal sent") !== -1) return true
+  if (text.indexOf("hls source is producing segments") !== -1) return true
+  return false
+}
+
 function statusSummary(state, protocol, target, monitor, elapsedSeconds) {
   var parts = [stateLabel(state), protocolLabel(protocol)]
   if (normalizeText(target) !== "") parts.push(normalizeText(target))
@@ -477,6 +488,7 @@ if (typeof module !== "undefined") {
     iconForState: iconForState,
     stateLabel: stateLabel,
     barTooltip: barTooltip,
+    isSessionReadyLine: isSessionReadyLine,
     statusSummary: statusSummary,
     formatElapsed: formatElapsed,
     safeJson: safeJson,

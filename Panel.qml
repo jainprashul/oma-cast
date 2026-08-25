@@ -84,9 +84,9 @@ Panel {
   readonly property string statusHeadline: {
     if (isBlocked) return fluxcastDiagnostic !== "" ? fluxcastDiagnostic : "FluxCast unavailable"
     if (displayState === "error") return lastError !== "" ? lastError : "Casting failed"
-    if (isScanning) return "Looking for displays…"
     if (currentState === "connecting") return "Connecting…"
     if (currentState === "casting") return currentTarget !== "" ? currentTarget : "Casting"
+    if (isScanning) return "Looking for displays…"
     if (!hasDevice) return "Choose a TV"
     return "Ready to cast"
   }
@@ -94,6 +94,11 @@ Panel {
   readonly property string statusDetail: {
     if (isBlocked) return lastErrorHint !== "" ? lastErrorHint : "Check dependencies or open the FluxCast tray."
     if (displayState === "error" && lastErrorHint !== "") return lastErrorHint
+    if (currentState === "connecting") {
+      var connectingParts = ["Waiting for the TV handshake"]
+      if (currentTarget !== "") connectingParts.unshift(currentTarget)
+      return connectingParts.join(" · ")
+    }
     if (isLiveSession) {
       var parts = [Model.protocolLabel(currentProtocol)]
       if (currentMonitor !== "") parts.push(currentMonitor)
@@ -200,15 +205,15 @@ Panel {
     var running = startProc.running === true
     var previousState = currentState
 
-    if (!fluxcastAvailable && !running) {
+    if (!fluxcastAvailable && !running && !startInFlight) {
       if (previousState !== "error") currentState = "unavailable"
       return
     }
 
-    if (running) {
+    if (running || startInFlight) {
       errorState = false
-      if (currentState !== "casting" && currentState !== "connecting") currentState = "connecting"
-      elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
+      if (currentState !== "casting") currentState = "connecting"
+      if (currentState === "casting") elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
       return
     }
 
@@ -299,11 +304,12 @@ Panel {
 
     clearError()
     startInFlight = true
+    currentState = "connecting"
     currentTarget = Model.deviceLabel(device)
     currentMonitor = Model.monitorLabel(monitor)
     currentProtocol = selectedProtocol || configuredProtocol || "wfd"
     var args = Model.buildStartArgs(currentProtocol, device, monitor, root.settings, fluxcastBin)
-    startProc.command = args
+    startProc.command = ["env", "PYTHONUNBUFFERED=1"].concat(args)
     startProc.running = true
   }
 
@@ -360,7 +366,7 @@ Panel {
       errorState = true
       currentState = "error"
       setError(result.error, result.hint)
-    } else if (!startProc.running) {
+    } else if (!startProc.running && !startInFlight && currentState !== "connecting" && currentState !== "casting") {
       currentState = fluxcastAvailable ? "idle" : "unavailable"
     }
     if (!selectedDevice && devices.length > 0) selectedDeviceKey = Model.deviceKey(devices[0])
@@ -371,9 +377,18 @@ Panel {
     startInFlight = false
     errorState = false
     currentState = "connecting"
-    sessionStartedAt = new Date()
+    sessionStartedAt = new Date(0)
+    elapsedSeconds = 0
     clearError()
-    connectingTimer.restart()
+  }
+
+  function onCastLogLine(line) {
+    if (!startProc.running || currentState !== "connecting") return
+    if (!Model.isSessionReadyLine(line)) return
+    currentState = "casting"
+    sessionStartedAt = new Date()
+    elapsedSeconds = 0
+    if (showNotifications) notify("Casting started", currentTarget !== "" ? currentTarget : "FluxCast session active")
   }
 
   function onCastExited(exitCode, stderrText) {
@@ -381,7 +396,6 @@ Panel {
     stopRequested = false
     startInFlight = false
     stopInFlight = false
-    connectingTimer.stop()
 
     if (wasStop) {
       errorState = false
@@ -509,18 +523,6 @@ Panel {
   }
 
   Timer {
-    id: connectingTimer
-    interval: 2000
-    repeat: false
-    onTriggered: {
-      if (startProc.running && root.currentState === "connecting") {
-        root.currentState = "casting"
-        if (root.showNotifications) root.notify("Casting started", root.currentTarget !== "" ? root.currentTarget : "FluxCast session active")
-      }
-    }
-  }
-
-  Timer {
     id: elapsedTimer
     interval: 1000
     repeat: true
@@ -592,11 +594,20 @@ Panel {
   Process {
     id: startProc
     property string stderrText: ""
-    stderr: StdioCollector {
-      onStreamFinished: startProc.stderrText = String(text || "")
+    stdout: SplitParser {
+      onRead: function(line) { root.onCastLogLine(line) }
+    }
+    stderr: SplitParser {
+      onRead: function(line) {
+        startProc.stderrText += (startProc.stderrText === "" ? "" : "\n") + line
+        root.onCastLogLine(line)
+      }
     }
     onRunningChanged: {
-      if (running && root.startInFlight) root.onCastStarted()
+      if (running && root.startInFlight) {
+        startProc.stderrText = ""
+        root.onCastStarted()
+      }
     }
     onExited: function(exitCode) {
       root.onCastExited(exitCode, stderrText)
@@ -776,6 +787,16 @@ Panel {
                     elide: Text.ElideRight
                   }
                 }
+              }
+
+              Text {
+                visible: root.currentState === "connecting"
+                width: parent.width
+                text: "Connecting…"
+                color: Color.accent
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
               }
 
               Text {

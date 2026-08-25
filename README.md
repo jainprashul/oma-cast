@@ -127,5 +127,59 @@ This plugin targets the **installed FluxCast CLI**, not a hypothetical JSON cont
 
 ---
 
+## 🛠️ Maintainer notes (publishing)
+
+Omarchy has **no plugin registry**. Publishing is: a public git repo with `manifest.json` at the root. Users clone default-branch **HEAD**; they do not install from tags or GitHub Releases.
+
+```bash
+omarchy plugin add https://github.com/jainprashul/oma-cast --enable
+```
+
+That clones into `~/.config/omarchy/plugins/io.github.jainprashul.omacast/`. Updates are a **fast-forward-only** pull of `origin HEAD`:
+
+```bash
+omarchy plugin update io.github.jainprashul.omacast
+```
+
+### Before every push to `master`
+
+1. **Keep `manifest.json` at the repo root.** Required: `schemaVersion` (JSON number `1`, not `"1"`), `id`, `name`, `version`, `kinds`, `entryPoints`.
+2. **Never change `id`** (`io.github.jainprashul.omacast`) after people have installed it. A new id is a different plugin; they must `plugin remove` then `plugin add` again.
+3. **Bump `version`** in `manifest.json` for each published change. The installer ignores it; it is for humans and `omarchy plugin list`.
+4. **Validate** (same checks `plugin add` / `plugin update` run; they refuse or roll back on failure):
+   ```bash
+   omarchy plugin validate .
+   ```
+5. **Keep `master` public and cloneable without credentials.** The add/update CLIs set `GIT_TERMINAL_PROMPT=0`. HTTPS URL: `https://github.com/jainprashul/oma-cast` (`.git` suffix optional; `https` / `ssh` / `git` only).
+6. **No symlinks** anywhere in the tree (validation rejects them). **Do not force-push or rewrite `master`** — installed checkouts cannot fast-forward past that.
+
+Do not bundle FluxCast. Keep it as an external CLI dependency; README install instructions must stay accurate for the tested FluxCast version.
+
+### Ship a version
+
+```bash
+# 1. Bump "version" in manifest.json
+# 2. Update README if user-facing behavior or FluxCast version changed
+omarchy plugin validate .
+git add manifest.json README.md
+git commit -m "Release 0.x.y: <why>"
+git push origin master
+```
+
+GitHub Releases/tags are optional (changelog for humans only). Installed users still get whatever is on `master` HEAD.
+
+### Local test without publishing
+
+Develop in this checkout, then copy into the install dir — **do not symlink** (forbidden):
+
+```bash
+rsync -a --delete --exclude .git ./ ~/.config/omarchy/plugins/io.github.jainprashul.omacast/
+omarchy-shell shell rescanPlugins
+```
+
+Saves under `~/.config/omarchy/plugins/` hot-reload. Force a rescan if the widget does not pick up changes.
+
+---
+
 ## 📜 License
 MIT © 2026 Prashul Jain. See [LICENSE](LICENSE).
