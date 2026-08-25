@@ -128,6 +128,12 @@ assert.strictEqual(
   "poll must not clear scanning while a scan is in flight"
 )
 
+assert.strictEqual(
+  Model.barIcon(),
+  "󰄘",
+  "bar icon stays the cast glyph regardless of session state"
+)
+
 assert.notStrictEqual(
   Model.iconForState("unavailable"),
   "",

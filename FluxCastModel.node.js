@@ -33,6 +33,7 @@ module.exports = {
   monitorByKey: entities.monitorByKey,
   isSessionReadyLine: session.isSessionReadyLine,
   resolveSessionState: session.resolveSessionState,
+  barIcon: presentation.barIcon,
   iconForState: presentation.iconForState,
   stateLabel: presentation.stateLabel,
   barTooltip: presentation.barTooltip,

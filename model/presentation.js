@@ -11,6 +11,12 @@ var STATE_META = {
   idle: { label: "Idle", icon: "󰄘" }
 }
 
+var BAR_CAST_ICON = STATE_META.idle.icon
+
+function barIcon() {
+  return BAR_CAST_ICON
+}
+
 function stateMeta(state) {
   var value = Text.normalizeText(state)
   return STATE_META[value] || { label: "Unavailable", icon: "󰅚" }
@@ -49,6 +55,7 @@ function statusSummary(state, protocol, target, monitor, elapsedSeconds) {
 }
 
 module.exports = {
+  barIcon: barIcon,
   iconForState: iconForState,
   stateLabel: stateLabel,
   barTooltip: barTooltip,

@@ -92,7 +92,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: Model.iconForState(root.displayState)
+    text: Model.barIcon()
     active: root.displayState === "casting" || root.displayState === "connecting" || root.displayState === "scanning"
     tooltipText: Model.barTooltip(root.displayState, root.currentTarget, root.currentProtocol, root.currentElapsedSeconds)
 
