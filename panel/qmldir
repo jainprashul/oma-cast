@@ -1,0 +1,9 @@
+# UI sections and subprocess backend for the oma-cast panel.
+module panel
+PanelBackend 1.0 PanelBackend.qml
+PanelContent 1.0 PanelContent.qml
+PanelHeroSection 1.0 PanelHeroSection.qml
+PanelErrorSection 1.0 PanelErrorSection.qml
+PanelLiveSessionSection 1.0 PanelLiveSessionSection.qml
+PanelSetupSection 1.0 PanelSetupSection.qml
+PanelActionsSection 1.0 PanelActionsSection.qml

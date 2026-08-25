@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "checkJs": false
+  },
+  "exclude": [
+    "FluxCastModel.js",
+    "model/qml-bundle.js"
+  ]
+}

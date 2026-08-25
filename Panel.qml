@@ -1,10 +1,8 @@
 import QtQuick
-import QtQuick.Controls
 import Quickshell
-import Quickshell.Io
 import qs.Ui
-import qs.Commons
 import "FluxCastModel.js" as Model
+import "panel"
 
 Panel {
   id: root
@@ -24,7 +22,6 @@ Panel {
   property string currentProtocol: "wfd"
   property string currentTarget: ""
   property string currentMonitor: ""
-  property int currentPid: 0
   property int elapsedSeconds: 0
   property var devices: []
   property var monitors: []
@@ -49,7 +46,6 @@ Panel {
   property bool stopRequested: false
   property bool sessionReady: false
   property string doctorRaw: ""
-  property string statusRaw: ""
   property string devicesRaw: ""
   property string monitorsRaw: ""
   property date sessionStartedAt: new Date(0)
@@ -59,11 +55,8 @@ Panel {
   readonly property bool launchTrayFallback: Model.settingBool(setting("launch-tray-fallback", true), true)
   readonly property string configuredProtocol: Model.normalizeProtocol(setting("protocol", "wfd"))
   readonly property string configuredMonitor: Model.normalizeText(setting("monitor", ""))
-  readonly property string configuredLogFile: Model.normalizeText(setting("log-file", "~/.local/state/fluxcast/fluxcast.log"))
+  readonly property string configuredLogFile: Model.normalizeText(setting("log-file", Model.defaultLogFile()))
 
-  readonly property bool openedForLayout: opened
-
-  readonly property bool structuredReady: fluxcastAvailable && currentState !== "unavailable"
   readonly property var selectedDevice: Model.deviceByKey(devices, selectedDeviceKey)
   readonly property var selectedMonitor: Model.monitorByKey(monitors, selectedMonitorKey)
   readonly property string displayState: errorState ? "error" : currentState
@@ -81,6 +74,7 @@ Panel {
   readonly property bool hasDevice: selectedDevice !== null
   readonly property bool canStartCast: isSetupPhase && hasDevice && selectedMonitor !== null && !isScanning && !startInFlight
   readonly property bool primaryBusy: scanInFlight || startInFlight || stopInFlight
+  readonly property bool nativeScanSupported: Model.buildScanArgs(selectedProtocol, fluxcastBin) !== null
 
   readonly property string statusHeadline: {
     if (isBlocked) return fluxcastDiagnostic !== "" ? fluxcastDiagnostic : "FluxCast unavailable"
@@ -120,7 +114,7 @@ Panel {
       return "Scanning…"
     }
     if (isBlocked) return launchTrayFallback ? "Open tray" : "Retry"
-    if (!hasDevice || devices.length === 0) return Model.buildScanArgs(selectedProtocol, fluxcastBin) ? "Find TVs" : "Open tray"
+    if (!hasDevice || devices.length === 0) return nativeScanSupported ? "Find TVs" : "Open tray"
     return "Start cast"
   }
 
@@ -128,6 +122,10 @@ Panel {
 
   readonly property color contentForeground: barForeground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
+
+  function elapsedSecondsFromSession() {
+    return Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
+  }
 
   function expandPath(path) {
     var value = Model.normalizeText(path)
@@ -163,21 +161,27 @@ Panel {
     errorState = false
   }
 
+  function runProcess(proc, command) {
+    proc.running = false
+    proc.command = command
+    proc.running = true
+  }
+
   function notify(title, body) {
     if (!showNotifications) return
-    notificationProc.command = ["notify-send", Model.normalizeText(title), Model.normalizeText(body)]
-    notificationProc.running = true
+    Quickshell.execDetached(["notify-send", Model.normalizeText(title), Model.normalizeText(body)])
   }
 
   function launchTray() {
     if (!launchTrayFallback || trayLaunching) return
     trayLaunching = true
-    trayProc.command = [fluxcastBin, "--tray"]
-    trayProc.running = true
+    runProcess(backend.trayProc, [fluxcastBin, "--tray"])
   }
 
   function refresh() {
-    if (doctorInFlight || monitorsInFlight) {
+    var doctorBusy = !Model.canRestartProcess(doctorInFlight, backend.doctorProc.running === true)
+    var monitorBusy = !Model.canRestartProcess(monitorsInFlight, backend.monitorProc.running === true)
+    if (doctorBusy || monitorBusy) {
       refreshQueued = true
       return
     }
@@ -189,25 +193,24 @@ Panel {
   }
 
   function requestDoctor() {
-    if (doctorInFlight) return
+    if (!Model.canRestartProcess(doctorInFlight, backend.doctorProc.running === true)) return
     doctorInFlight = true
-    doctorProc.command = [fluxcastBin, "--doctor-json"]
-    doctorProc.running = true
+    runProcess(backend.doctorProc, [fluxcastBin, "--doctor-json"])
   }
 
   function requestMonitors() {
-    if (monitorsInFlight) return
+    if (!Model.canRestartProcess(monitorsInFlight, backend.monitorProc.running === true)) return
     monitorsInFlight = true
-    monitorProc.command = ["hyprctl", "monitors", "-j"]
-    monitorProc.running = true
+    runProcess(backend.monitorProc, ["hyprctl", "monitors", "-j"])
   }
 
   function sessionSnapshot(action) {
     return {
       currentState: currentState,
-      running: startProc.running === true,
+      running: backend.startProc.running === true,
       startInFlight: startInFlight,
       sessionReady: sessionReady,
+      scanInFlight: scanInFlight,
       fluxcastAvailable: fluxcastAvailable,
       errorState: errorState,
       action: action || "poll"
@@ -215,9 +218,9 @@ Panel {
   }
 
   function applyLocalStatus() {
-    var running = startProc.running === true
+    var running = backend.startProc.running === true
     currentState = Model.resolveSessionState(sessionSnapshot("poll"))
-    if (currentState === "casting") elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
+    if (currentState === "casting") elapsedSeconds = elapsedSecondsFromSession()
     if (running || startInFlight || sessionReady) errorState = false
   }
 
@@ -238,16 +241,15 @@ Panel {
     scanInFlight = true
     scanQueued = false
     currentState = Model.resolveSessionState(sessionSnapshot("scan"))
-    scanProc.command = args
-    scanProc.running = true
+    runProcess(backend.scanProc, args)
   }
 
   function stop() {
     if (stopInFlight) return
-    if (!startProc.running && currentState !== "casting" && currentState !== "connecting") return
+    if (!isLiveSession && !backend.startProc.running) return
     stopInFlight = true
     stopRequested = true
-    startProc.running = false
+    backend.startProc.running = false
   }
 
   function pickBestDevice() {
@@ -304,8 +306,7 @@ Panel {
     currentMonitor = Model.monitorLabel(monitor)
     currentProtocol = selectedProtocol || configuredProtocol || "wfd"
     var args = Model.buildStartArgs(currentProtocol, device, monitor, root.settings, fluxcastBin)
-    startProc.command = ["env", "PYTHONUNBUFFERED=1"].concat(args)
-    startProc.running = true
+    runProcess(backend.startProc, ["env", "PYTHONUNBUFFERED=1"].concat(args))
   }
 
   function onDoctorResult(parsed, exitCode, stderrText) {
@@ -317,9 +318,9 @@ Panel {
 
     if (result.available) {
       dependencyNotificationShown = false
-      if (!isLiveSession && !startProc.running && currentState === "unavailable")
+      if (!isLiveSession && !backend.startProc.running && currentState === "unavailable")
         currentState = "idle"
-    } else if (!isLiveSession && !startProc.running) {
+    } else if (!isLiveSession && !backend.startProc.running) {
       currentState = Model.resolveSessionState(sessionSnapshot("doctor-fail"))
       if (result.message !== "") setError(result.message, result.hint)
       if (result.missing.length > 0 && showNotifications && !dependencyNotificationShown) {
@@ -340,7 +341,7 @@ Panel {
     monitors = result.monitors
     monitorsRaw = result.raw
     if (result.error !== "") {
-      if (!isLiveSession && !startProc.running) {
+      if (!isLiveSession && !backend.startProc.running) {
         errorState = true
         currentState = "error"
         setError(result.error, result.hint)
@@ -362,12 +363,12 @@ Panel {
     devices = result.devices
     devicesRaw = result.raw
     if (result.error !== "") {
-      if (!isLiveSession && !startProc.running) {
+      if (!isLiveSession && !backend.startProc.running) {
         errorState = true
         currentState = "error"
         setError(result.error, result.hint)
       }
-    } else if (!isLiveSession && !startProc.running && !startInFlight) {
+    } else if (!isLiveSession && !backend.startProc.running && !startInFlight) {
       currentState = fluxcastAvailable ? "idle" : "unavailable"
     }
     if (!selectedDevice && devices.length > 0) selectedDeviceKey = Model.deviceKey(devices[0])
@@ -377,19 +378,14 @@ Panel {
   function onCastStarted() {
     startInFlight = false
     errorState = false
-    currentState = "connecting"
     sessionStartedAt = new Date(0)
     elapsedSeconds = 0
     clearError()
   }
 
   function onCastLogLine(line) {
-    if (!startProc.running) return
+    if (!backend.startProc.running || sessionReady) return
     if (!Model.isSessionReadyLine(line)) return
-    if (sessionReady) {
-      currentState = "casting"
-      return
-    }
     sessionReady = true
     currentState = "casting"
     sessionStartedAt = new Date()
@@ -405,7 +401,6 @@ Panel {
     stopInFlight = false
     currentTarget = ""
     currentMonitor = ""
-    currentPid = 0
     elapsedSeconds = 0
     sessionStartedAt = new Date(0)
 
@@ -429,10 +424,13 @@ Panel {
   }
 
   function openLog() {
-    var path = expandPath(configuredLogFile)
-    if (path === "") path = expandPath("~/.local/state/fluxcast")
-    openLogProc.command = ["xdg-open", path]
-    openLogProc.running = true
+    var paths = Model.logPathsToOpen(expandPath(configuredLogFile))
+    Quickshell.execDetached([
+      "bash",
+      "-lc",
+      'for p in "$@"; do if [ -e "$p" ]; then exec xdg-open "$p"; fi; done; notify-send -a "Oma Cast" "FluxCast log" "No log file yet. Cast once, then try again."',
+      "oma-cast-open-log"
+    ].concat(paths))
   }
 
   function syncFromSettings() {
@@ -463,7 +461,7 @@ Panel {
       selectedMonitorKey: selectedMonitorKey,
       scanInFlight: scanInFlight,
       startInFlight: startInFlight,
-      startRunning: startProc.running,
+      startRunning: backend.startProc.running,
       doctorInFlight: doctorInFlight,
       monitorsInFlight: monitorsInFlight
     })
@@ -480,8 +478,8 @@ Panel {
       else refresh()
       return
     }
-    if (!hasDevice || devices.length === 0 || !Model.buildScanArgs(selectedProtocol, fluxcastBin)) {
-      if (Model.buildScanArgs(selectedProtocol, fluxcastBin)) scan()
+    if (!hasDevice || devices.length === 0 || !nativeScanSupported) {
+      if (nativeScanSupported) scan()
       else if (launchTrayFallback) launchTray()
       return
     }
@@ -503,7 +501,7 @@ Panel {
   }
 
   function switchPanel(direction) {
-    if (root.bar && typeof root.brar.switchPanelFrom === "function")
+    if (root.bar && typeof root.bar.switchPanelFrom === "function")
       return root.bar.switchPanelFrom(root.hostWidget || root, direction)
     return false
   }
@@ -514,7 +512,7 @@ Panel {
   }
 
   onOpenedChanged: {
-    if (opened && scanOnOpen && !isLiveSession && !startProc.running) Qt.callLater(scan)
+    if (opened && scanOnOpen && !isLiveSession && !backend.startProc.running) Qt.callLater(scan)
   }
 
   onSettingsChanged: syncFromSettings()
@@ -526,495 +524,12 @@ Panel {
     }
   }
 
-  Timer {
-    id: elapsedTimer
-    interval: 1000
-    repeat: true
-    running: root.currentState === "casting"
-    onTriggered: root.elapsedSeconds = Model.elapsedSeconds(root.sessionStartedAt, root.elapsedSeconds)
+  PanelBackend {
+    id: backend
+    controller: root
   }
 
-  Timer {
-    id: statusTimer
-    interval: 5000
-    repeat: true
-    running: root.opened || root.currentState === "casting" || root.currentState === "connecting" || root.currentState === "scanning"
-    triggeredOnStart: false
-    onTriggered: root.applyLocalStatus()
-  }
-
-  Process {
-    id: doctorProc
-    property string stderrText: ""
-    command: [root.fluxcastBin, "--doctor-json"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.doctorRaw = String(text || "")
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: doctorProc.stderrText = String(text || "")
-    }
-    onExited: function(exitCode) {
-      root.onDoctorResult(doctorRaw, exitCode, stderrText)
-      stderrText = ""
-    }
-  }
-
-  Process {
-    id: monitorProc
-    property string stderrText: ""
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.monitorsRaw = String(text || "")
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: monitorProc.stderrText = String(text || "")
-    }
-    onExited: function(exitCode) {
-      root.onMonitorResult(monitorsRaw, exitCode, stderrText)
-      stderrText = ""
-    }
-  }
-
-  Process {
-    id: scanProc
-    property string stderrText: ""
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.devicesRaw = String(text || "")
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: scanProc.stderrText = String(text || "")
-    }
-    onExited: function(exitCode) {
-      root.onScanResult(devicesRaw, exitCode, stderrText)
-      stderrText = ""
-    }
-  }
-
-  Process {
-    id: startProc
-    property string stderrText: ""
-    stdout: SplitParser {
-      onRead: function(line) { root.onCastLogLine(line) }
-    }
-    stderr: SplitParser {
-      onRead: function(line) {
-        startProc.stderrText += (startProc.stderrText === "" ? "" : "\n") + line
-        root.onCastLogLine(line)
-      }
-    }
-    onRunningChanged: {
-      if (running && root.startInFlight) {
-        startProc.stderrText = ""
-        root.onCastStarted()
-      }
-    }
-    onExited: function(exitCode) {
-      root.onCastExited(exitCode, stderrText)
-      stderrText = ""
-    }
-  }
-
-  Process {
-    id: notificationProc
-  }
-
-  Process {
-    id: trayProc
-    onExited: trayLaunching = false
-  }
-
-  Process {
-    id: openLogProc
-  }
-
-  KeyboardPanel {
-    id: panel
-    anchorItem: root.anchorItem
-    owner: root.hostWidget || root
-    bar: root.bar
-    open: root.opened
-    focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(panelScroll.contentHeight, Style.space(520))
-
-    PanelKeyCatcher {
-      id: keyCatcher
-      anchors.fill: parent
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
-
-      Flickable {
-        id: panelScroll
-        anchors.fill: parent
-        contentWidth: width
-        contentHeight: content.implicitHeight
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        interactive: contentHeight > height
-
-        Column {
-          id: content
-          width: parent.width
-          spacing: Style.space(12)
-
-          // ---- Hero -------------------------------------------------------
-          Item {
-            width: parent.width
-            height: Math.max(heroIcon.implicitHeight, heroText.implicitHeight)
-
-            Text {
-              id: heroIcon
-              text: Model.iconForState(root.displayState)
-              color: root.contentForeground
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.fontPx(2.2)
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Column {
-              id: heroText
-              anchors.left: heroIcon.right
-              anchors.leftMargin: Style.space(10)
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
-
-              Text {
-                width: parent.width
-                text: root.statusHeadline
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.subtitle
-                font.bold: true
-                wrapMode: Text.WordWrap
-                elide: Text.ElideRight
-                maximumLineCount: 2
-              }
-
-              Text {
-                width: parent.width
-                text: root.statusDetail
-                color: root.contentForeground
-                opacity: 0.72
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-                elide: Text.ElideRight
-                maximumLineCount: 2
-              }
-            }
-          }
-
-          // ---- Error banner -----------------------------------------------
-          Rectangle {
-            visible: root.lastError !== "" && root.displayState === "error"
-            width: parent.width
-            radius: Style.space(8)
-            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.08)
-            border.color: Color.urgent
-            border.width: 1
-            implicitHeight: errorColumn.implicitHeight + Style.space(12)
-
-            Column {
-              id: errorColumn
-              anchors.fill: parent
-              anchors.margins: Style.space(6)
-              spacing: Style.space(2)
-
-              Text {
-                width: parent.width
-                text: root.lastErrorHint !== "" ? root.lastErrorHint : "Try scanning again or inspect the FluxCast log."
-                color: root.contentForeground
-                opacity: 0.85
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-          }
-
-          // ---- Live session card ------------------------------------------
-          Rectangle {
-            visible: root.isLiveSession
-            width: parent.width
-            radius: Style.space(8)
-            color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.06)
-            border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.14)
-            border.width: 1
-            implicitHeight: liveColumn.implicitHeight + Style.space(14)
-
-            Column {
-              id: liveColumn
-              anchors.fill: parent
-              anchors.margins: Style.space(8)
-              spacing: Style.space(6)
-
-              Row {
-                width: parent.width
-                spacing: Style.space(8)
-
-                Text {
-                  text: "󰒋"
-                  color: root.contentForeground
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.body
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Column {
-                  width: parent.width - Style.space(24)
-                  spacing: 1
-
-                  Text {
-                    width: parent.width
-                    text: root.currentTarget !== "" ? root.currentTarget : "Receiver"
-                    color: root.contentForeground
-                    font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: (root.currentMonitor !== "" ? root.currentMonitor : "Display") + " · " + Model.protocolLabel(root.currentProtocol)
-                    color: root.contentForeground
-                    opacity: 0.7
-                    font.family: root.contentFontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
-                  }
-                }
-              }
-
-              Text {
-                visible: root.currentState === "connecting"
-                width: parent.width
-                text: "Connecting…"
-                color: Color.accent
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                font.bold: true
-              }
-
-              Text {
-                visible: root.currentState === "casting"
-                width: parent.width
-                text: Model.formatElapsed(root.elapsedSeconds)
-                color: Color.accent
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.title
-                font.bold: true
-              }
-            }
-          }
-
-          // ---- Setup: protocol + devices + monitor ------------------------
-          Column {
-            visible: root.isSetupPhase
-            width: parent.width
-            spacing: Style.space(10)
-
-            Column {
-              width: parent.width
-              spacing: Style.space(6)
-              visible: !root.isScanning
-
-              Text {
-                width: parent.width
-                text: "Protocol"
-                color: root.contentForeground
-                opacity: 0.65
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
-
-              Flow {
-                width: parent.width
-                spacing: Style.space(6)
-
-                Repeater {
-                  model: root.protocolOptions
-
-                  delegate: Button {
-                    selected: root.selectedProtocol === modelData.id
-                    bordered: true
-                    foreground: root.contentForeground
-                    text: modelData.label
-                    onClicked: {
-                      if (root.selectedProtocol === modelData.id) return
-                      root.selectedProtocol = modelData.id
-                      root.persistSettings({ protocol: modelData.id })
-                    }
-                  }
-                }
-              }
-            }
-
-            Column {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Row {
-                width: parent.width
-                spacing: Style.space(8)
-
-                Text {
-                  text: "Receivers"
-                  color: root.contentForeground
-                  opacity: 0.65
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Item { width: Style.space(4); height: 1 }
-
-                Button {
-                  id: rescanBtn
-                  iconText: "󰑐"
-                  tooltipText: root.isScanning ? "Scanning…" : "Scan again"
-                  bordered: true
-                  foreground: root.contentForeground
-                  iconSpinning: root.isScanning
-                  opacity: root.isScanning ? 0.6 : 1
-                  anchors.verticalCenter: parent.verticalCenter
-                  onClicked: {
-                    if (!root.isScanning) root.scan()
-                  }
-                }
-              }
-
-              Column {
-                width: parent.width
-                spacing: Style.space(4)
-
-                Repeater {
-                  model: root.devices
-
-                  delegate: Button {
-                    width: parent.width
-                    leftAlign: true
-                    selected: Model.deviceKey(modelData) === root.selectedDeviceKey
-                    bordered: true
-                    foreground: root.contentForeground
-                    text: Model.deviceLabel(modelData)
-                    onClicked: root.selectedDeviceKey = Model.deviceKey(modelData)
-                  }
-                }
-
-                Text {
-                  visible: root.devices.length === 0
-                  width: parent.width
-                  text: root.isScanning
-                    ? "Scanning for nearby TVs…"
-                    : (Model.buildScanArgs(root.selectedProtocol, root.fluxcastBin)
-                      ? "No receivers yet. Tap Find TVs to scan."
-                      : "Use the tray to discover DLNA or Chromecast devices.")
-                  color: root.contentForeground
-                  opacity: 0.6
-                  font.family: root.contentFontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-              }
-            }
-
-            Column {
-              visible: root.canPickMonitor
-              width: parent.width
-              spacing: Style.space(6)
-
-              Text {
-                width: parent.width
-                text: "Screen"
-                color: root.contentForeground
-                opacity: 0.65
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
-
-              Flow {
-                width: parent.width
-                spacing: Style.space(6)
-
-                Repeater {
-                  model: root.monitors
-
-                  delegate: Button {
-                    selected: Model.monitorKey(modelData) === root.selectedMonitorKey
-                    bordered: true
-                    foreground: root.contentForeground
-                    text: Model.monitorLabel(modelData)
-                    onClicked: {
-                      root.selectedMonitorKey = Model.monitorKey(modelData)
-                      root.persistSettings({ monitor: Model.monitorKey(modelData) })
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          PanelSeparator {
-            width: parent.width
-            foreground: root.contentForeground
-          }
-
-          // ---- Primary action + secondary links ---------------------------
-          Button {
-            width: parent.width
-            leftAlign: true
-            bordered: true
-            active: root.isLiveSession
-            selected: root.isLiveSession
-            foreground: root.isLiveSession ? Color.urgent : root.contentForeground
-            text: root.primaryLabel
-            opacity: root.primaryEnabled ? 1 : 0.45
-            onClicked: root.primaryAction()
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-
-            Button {
-              visible: root.launchTrayFallback
-              text: "Tray"
-              bordered: true
-              foreground: root.contentForeground
-              onClicked: root.launchTray()
-            }
-
-            Button {
-              text: "Log"
-              bordered: true
-              foreground: root.contentForeground
-              onClicked: root.openLog()
-            }
-
-            Button {
-              visible: root.isSetupPhase
-              text: "Refresh"
-              bordered: true
-              foreground: root.contentForeground
-              opacity: root.doctorInFlight || root.monitorsInFlight ? 0.5 : 1
-              onClicked: {
-                if (!root.doctorInFlight && !root.monitorsInFlight) root.refresh()
-              }
-            }
-          }
-        }
-      }
-    }
+  PanelContent {
+    controller: root
   }
 }
