@@ -1,5 +1,5 @@
 const assert = require("assert")
-const Model = require("./FluxCastModel.js")
+const Model = require("./FluxCastModel.node.js")
 
 assert.strictEqual(
   typeof Model.isSessionReadyLine,
@@ -116,15 +116,16 @@ assert.strictEqual(
 )
 
 assert.strictEqual(
-  Model.barIconVisible(false, "unavailable"),
-  true,
-  "bar icon must stay visible so FluxCast can be opened while unavailable"
-)
-
-assert.strictEqual(
-  Model.barIconVisible(false, "idle"),
-  true,
-  "bar icon stays visible when idle"
+  Model.resolveSessionState({
+    currentState: "scanning",
+    running: false,
+    sessionReady: false,
+    scanInFlight: true,
+    fluxcastAvailable: true,
+    action: "poll"
+  }),
+  "scanning",
+  "poll must not clear scanning while a scan is in flight"
 )
 
 assert.notStrictEqual(
@@ -155,6 +156,48 @@ assert.strictEqual(
   }),
   "idle",
   "successful doctor must leave unavailable so the idle icon can show"
+)
+
+assert.strictEqual(
+  Model.defaultLogFile(),
+  "/tmp/fluxcast-cast.log",
+  "Log must open FluxCast's real session log, not a path FluxCast never writes"
+)
+
+assert.deepStrictEqual(
+  Model.logPathsToOpen(""),
+  ["/tmp/fluxcast-cast.log"],
+  "empty config still opens the FluxCast session log"
+)
+
+assert.deepStrictEqual(
+  Model.logPathsToOpen("/tmp/fluxcast-cast.log"),
+  ["/tmp/fluxcast-cast.log"],
+  "configured FluxCast log is not duplicated"
+)
+
+assert.deepStrictEqual(
+  Model.logPathsToOpen("/home/pjain/.local/state/fluxcast/fluxcast.log"),
+  ["/home/pjain/.local/state/fluxcast/fluxcast.log", "/tmp/fluxcast-cast.log"],
+  "custom log-file is tried first, then the FluxCast session log"
+)
+
+assert.strictEqual(
+  Model.canRestartProcess(false, false),
+  true,
+  "refresh can start when the previous doctor/monitor process has exited"
+)
+
+assert.strictEqual(
+  Model.canRestartProcess(true, false),
+  true,
+  "refresh recovers when the in-flight flag stuck after the process died"
+)
+
+assert.strictEqual(
+  Model.canRestartProcess(true, true),
+  false,
+  "refresh queues while a doctor/monitor process is still running"
 )
 
 console.log("ok")

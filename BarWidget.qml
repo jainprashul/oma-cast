@@ -14,7 +14,7 @@ BarWidget {
   readonly property string currentTarget: panelLoader.item ? panelLoader.item.currentTarget : ""
   readonly property string currentProtocol: panelLoader.item ? panelLoader.item.currentProtocol : "wfd"
   readonly property int currentElapsedSeconds: panelLoader.item ? panelLoader.item.elapsedSeconds : 0
-  readonly property bool visibleInBar: Model.barIconVisible(opened, displayState)
+  readonly property bool isLiveSession: panelLoader.item ? panelLoader.item.isLiveSession : false
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()
@@ -59,7 +59,7 @@ BarWidget {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
-  visible: visibleInBar
+  visible: true
 
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
@@ -100,7 +100,7 @@ BarWidget {
       if (buttonCode === Qt.LeftButton) {
         root.toggle()
       } else if (buttonCode === Qt.RightButton) {
-        if (root.currentState === "casting") root.stop()
+        if (root.isLiveSession) root.stop()
         else root.toggle()
       } else if (buttonCode === Qt.MiddleButton) {
         root.refresh()

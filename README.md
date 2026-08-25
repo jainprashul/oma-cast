@@ -103,7 +103,7 @@ Optional inline settings in `shell.json` or the plugin entry:
 | `scan-on-open` | `true` / `false` | `true` |
 | `show-notifications` | `true` / `false` | `true` |
 | `launch-tray-fallback` | `true` / `false` | `true` |
-| `log-file` | path | `~/.local/state/fluxcast/fluxcast.log` |
+| `log-file` | path | `/tmp/fluxcast-cast.log` (FluxCast session log) |
 | `fps` | number | FluxCast default |
 | `bitrate` | e.g. `4M` | FluxCast default |
 | `wfd-capture-backend` | `auto`, `portal`, `wf-recorder`, `x11grab`, `gst-x11` | FluxCast default |

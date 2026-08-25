@@ -24,7 +24,6 @@ Panel {
   property string currentProtocol: "wfd"
   property string currentTarget: ""
   property string currentMonitor: ""
-  property int currentPid: 0
   property int elapsedSeconds: 0
   property var devices: []
   property var monitors: []
@@ -49,7 +48,6 @@ Panel {
   property bool stopRequested: false
   property bool sessionReady: false
   property string doctorRaw: ""
-  property string statusRaw: ""
   property string devicesRaw: ""
   property string monitorsRaw: ""
   property date sessionStartedAt: new Date(0)
@@ -59,11 +57,8 @@ Panel {
   readonly property bool launchTrayFallback: Model.settingBool(setting("launch-tray-fallback", true), true)
   readonly property string configuredProtocol: Model.normalizeProtocol(setting("protocol", "wfd"))
   readonly property string configuredMonitor: Model.normalizeText(setting("monitor", ""))
-  readonly property string configuredLogFile: Model.normalizeText(setting("log-file", "~/.local/state/fluxcast/fluxcast.log"))
+  readonly property string configuredLogFile: Model.normalizeText(setting("log-file", Model.defaultLogFile()))
 
-  readonly property bool openedForLayout: opened
-
-  readonly property bool structuredReady: fluxcastAvailable && currentState !== "unavailable"
   readonly property var selectedDevice: Model.deviceByKey(devices, selectedDeviceKey)
   readonly property var selectedMonitor: Model.monitorByKey(monitors, selectedMonitorKey)
   readonly property string displayState: errorState ? "error" : currentState
@@ -81,6 +76,7 @@ Panel {
   readonly property bool hasDevice: selectedDevice !== null
   readonly property bool canStartCast: isSetupPhase && hasDevice && selectedMonitor !== null && !isScanning && !startInFlight
   readonly property bool primaryBusy: scanInFlight || startInFlight || stopInFlight
+  readonly property bool nativeScanSupported: Model.buildScanArgs(selectedProtocol, fluxcastBin) !== null
 
   readonly property string statusHeadline: {
     if (isBlocked) return fluxcastDiagnostic !== "" ? fluxcastDiagnostic : "FluxCast unavailable"
@@ -120,7 +116,7 @@ Panel {
       return "Scanning…"
     }
     if (isBlocked) return launchTrayFallback ? "Open tray" : "Retry"
-    if (!hasDevice || devices.length === 0) return Model.buildScanArgs(selectedProtocol, fluxcastBin) ? "Find TVs" : "Open tray"
+    if (!hasDevice || devices.length === 0) return nativeScanSupported ? "Find TVs" : "Open tray"
     return "Start cast"
   }
 
@@ -163,21 +159,27 @@ Panel {
     errorState = false
   }
 
+  function runProcess(proc, command) {
+    proc.running = false
+    proc.command = command
+    proc.running = true
+  }
+
   function notify(title, body) {
     if (!showNotifications) return
-    notificationProc.command = ["notify-send", Model.normalizeText(title), Model.normalizeText(body)]
-    notificationProc.running = true
+    Quickshell.execDetached(["notify-send", Model.normalizeText(title), Model.normalizeText(body)])
   }
 
   function launchTray() {
     if (!launchTrayFallback || trayLaunching) return
     trayLaunching = true
-    trayProc.command = [fluxcastBin, "--tray"]
-    trayProc.running = true
+    runProcess(trayProc, [fluxcastBin, "--tray"])
   }
 
   function refresh() {
-    if (doctorInFlight || monitorsInFlight) {
+    var doctorBusy = !Model.canRestartProcess(doctorInFlight, doctorProc.running === true)
+    var monitorBusy = !Model.canRestartProcess(monitorsInFlight, monitorProc.running === true)
+    if (doctorBusy || monitorBusy) {
       refreshQueued = true
       return
     }
@@ -189,17 +191,15 @@ Panel {
   }
 
   function requestDoctor() {
-    if (doctorInFlight) return
+    if (!Model.canRestartProcess(doctorInFlight, doctorProc.running === true)) return
     doctorInFlight = true
-    doctorProc.command = [fluxcastBin, "--doctor-json"]
-    doctorProc.running = true
+    runProcess(doctorProc, [fluxcastBin, "--doctor-json"])
   }
 
   function requestMonitors() {
-    if (monitorsInFlight) return
+    if (!Model.canRestartProcess(monitorsInFlight, monitorProc.running === true)) return
     monitorsInFlight = true
-    monitorProc.command = ["hyprctl", "monitors", "-j"]
-    monitorProc.running = true
+    runProcess(monitorProc, ["hyprctl", "monitors", "-j"])
   }
 
   function sessionSnapshot(action) {
@@ -208,6 +208,7 @@ Panel {
       running: startProc.running === true,
       startInFlight: startInFlight,
       sessionReady: sessionReady,
+      scanInFlight: scanInFlight,
       fluxcastAvailable: fluxcastAvailable,
       errorState: errorState,
       action: action || "poll"
@@ -238,13 +239,12 @@ Panel {
     scanInFlight = true
     scanQueued = false
     currentState = Model.resolveSessionState(sessionSnapshot("scan"))
-    scanProc.command = args
-    scanProc.running = true
+    runProcess(scanProc, args)
   }
 
   function stop() {
     if (stopInFlight) return
-    if (!startProc.running && currentState !== "casting" && currentState !== "connecting") return
+    if (!isLiveSession && !startProc.running) return
     stopInFlight = true
     stopRequested = true
     startProc.running = false
@@ -304,8 +304,7 @@ Panel {
     currentMonitor = Model.monitorLabel(monitor)
     currentProtocol = selectedProtocol || configuredProtocol || "wfd"
     var args = Model.buildStartArgs(currentProtocol, device, monitor, root.settings, fluxcastBin)
-    startProc.command = ["env", "PYTHONUNBUFFERED=1"].concat(args)
-    startProc.running = true
+    runProcess(startProc, ["env", "PYTHONUNBUFFERED=1"].concat(args))
   }
 
   function onDoctorResult(parsed, exitCode, stderrText) {
@@ -377,19 +376,14 @@ Panel {
   function onCastStarted() {
     startInFlight = false
     errorState = false
-    currentState = "connecting"
     sessionStartedAt = new Date(0)
     elapsedSeconds = 0
     clearError()
   }
 
   function onCastLogLine(line) {
-    if (!startProc.running) return
+    if (!startProc.running || sessionReady) return
     if (!Model.isSessionReadyLine(line)) return
-    if (sessionReady) {
-      currentState = "casting"
-      return
-    }
     sessionReady = true
     currentState = "casting"
     sessionStartedAt = new Date()
@@ -405,7 +399,6 @@ Panel {
     stopInFlight = false
     currentTarget = ""
     currentMonitor = ""
-    currentPid = 0
     elapsedSeconds = 0
     sessionStartedAt = new Date(0)
 
@@ -429,10 +422,13 @@ Panel {
   }
 
   function openLog() {
-    var path = expandPath(configuredLogFile)
-    if (path === "") path = expandPath("~/.local/state/fluxcast")
-    openLogProc.command = ["xdg-open", path]
-    openLogProc.running = true
+    var paths = Model.logPathsToOpen(expandPath(configuredLogFile))
+    Quickshell.execDetached([
+      "bash",
+      "-lc",
+      'for p in "$@"; do if [ -e "$p" ]; then exec xdg-open "$p"; fi; done; notify-send -a "Oma Cast" "FluxCast log" "No log file yet. Cast once, then try again."',
+      "oma-cast-open-log"
+    ].concat(paths))
   }
 
   function syncFromSettings() {
@@ -480,8 +476,8 @@ Panel {
       else refresh()
       return
     }
-    if (!hasDevice || devices.length === 0 || !Model.buildScanArgs(selectedProtocol, fluxcastBin)) {
-      if (Model.buildScanArgs(selectedProtocol, fluxcastBin)) scan()
+    if (!hasDevice || devices.length === 0 || !nativeScanSupported) {
+      if (nativeScanSupported) scan()
       else if (launchTrayFallback) launchTray()
       return
     }
@@ -503,7 +499,7 @@ Panel {
   }
 
   function switchPanel(direction) {
-    if (root.bar && typeof root.brar.switchPanelFrom === "function")
+    if (root.bar && typeof root.bar.switchPanelFrom === "function")
       return root.bar.switchPanelFrom(root.hostWidget || root, direction)
     return false
   }
@@ -538,7 +534,7 @@ Panel {
     id: statusTimer
     interval: 5000
     repeat: true
-    running: root.opened || root.currentState === "casting" || root.currentState === "connecting" || root.currentState === "scanning"
+    running: root.currentState === "casting" || root.currentState === "connecting" || root.currentState === "scanning"
     triggeredOnStart: false
     onTriggered: root.applyLocalStatus()
   }
@@ -597,39 +593,31 @@ Panel {
 
   Process {
     id: startProc
-    property string stderrText: ""
+    property var stderrLines: []
     stdout: SplitParser {
       onRead: function(line) { root.onCastLogLine(line) }
     }
     stderr: SplitParser {
       onRead: function(line) {
-        startProc.stderrText += (startProc.stderrText === "" ? "" : "\n") + line
+        startProc.stderrLines.push(line)
         root.onCastLogLine(line)
       }
     }
     onRunningChanged: {
       if (running && root.startInFlight) {
-        startProc.stderrText = ""
+        startProc.stderrLines = []
         root.onCastStarted()
       }
     }
     onExited: function(exitCode) {
-      root.onCastExited(exitCode, stderrText)
-      stderrText = ""
+      root.onCastExited(exitCode, startProc.stderrLines.join("\n"))
+      startProc.stderrLines = []
     }
-  }
-
-  Process {
-    id: notificationProc
   }
 
   Process {
     id: trayProc
     onExited: trayLaunching = false
-  }
-
-  Process {
-    id: openLogProc
   }
 
   KeyboardPanel {
@@ -662,7 +650,7 @@ Panel {
           width: parent.width
           spacing: Style.space(12)
 
-          // ---- Hero -------------------------------------------------------
+
           Item {
             width: parent.width
             height: Math.max(heroIcon.implicitHeight, heroText.implicitHeight)
@@ -711,7 +699,7 @@ Panel {
             }
           }
 
-          // ---- Error banner -----------------------------------------------
+
           Rectangle {
             visible: root.lastError !== "" && root.displayState === "error"
             width: parent.width
@@ -739,7 +727,7 @@ Panel {
             }
           }
 
-          // ---- Live session card ------------------------------------------
+
           Rectangle {
             visible: root.isLiveSession
             width: parent.width
@@ -815,7 +803,7 @@ Panel {
             }
           }
 
-          // ---- Setup: protocol + devices + monitor ------------------------
+
           Column {
             visible: root.isSetupPhase
             width: parent.width
@@ -916,7 +904,7 @@ Panel {
                   width: parent.width
                   text: root.isScanning
                     ? "Scanning for nearby TVs…"
-                    : (Model.buildScanArgs(root.selectedProtocol, root.fluxcastBin)
+                    : (root.nativeScanSupported
                       ? "No receivers yet. Tap Find TVs to scan."
                       : "Use the tray to discover DLNA or Chromecast devices.")
                   color: root.contentForeground
@@ -970,7 +958,7 @@ Panel {
             foreground: root.contentForeground
           }
 
-          // ---- Primary action + secondary links ---------------------------
+
           Button {
             width: parent.width
             leftAlign: true
@@ -999,18 +987,20 @@ Panel {
               text: "Log"
               bordered: true
               foreground: root.contentForeground
+              tooltipText: "Open the FluxCast session log"
               onClicked: root.openLog()
             }
 
             Button {
-              visible: root.isSetupPhase
+              visible: !root.isLiveSession
               text: "Refresh"
               bordered: true
               foreground: root.contentForeground
-              opacity: root.doctorInFlight || root.monitorsInFlight ? 0.5 : 1
-              onClicked: {
-                if (!root.doctorInFlight && !root.monitorsInFlight) root.refresh()
-              }
+              iconText: "󰑐"
+              iconSpinning: root.doctorInFlight || root.monitorsInFlight
+              opacity: root.doctorInFlight || root.monitorsInFlight ? 0.7 : 1
+              tooltipText: "Reload FluxCast diagnostics and displays"
+              onClicked: root.refresh()
             }
           }
         }
