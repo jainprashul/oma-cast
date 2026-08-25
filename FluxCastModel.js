@@ -14,8 +14,14 @@ function normalizeProtocol(value) {
   var protocol = normalizeText(value).toLowerCase()
   if (protocol === "miracast" || protocol === "wfd") return "wfd"
   if (protocol === "dlna") return "dlna"
-  if (protocol === "chromecast") return "chromecast"
+  if (protocol === "chromecast" || protocol === "cast") return "chromecast"
   return "wfd"
+}
+
+function fluxcastProtocol(value) {
+  var protocol = normalizeProtocol(value)
+  if (protocol === "chromecast") return "cast"
+  return protocol
 }
 
 function protocolLabel(value) {
@@ -156,19 +162,44 @@ function parseDoctorPayload(raw) {
   else if (Array.isArray(parsed.missingDependencies)) missing = parsed.missingDependencies.slice()
   else if (Array.isArray(parsed.dependenciesMissing)) missing = parsed.dependenciesMissing.slice()
 
-  var available = parsed.available !== undefined ? !!parsed.available : true
+  var checks = arrayOf(parsed.checks)
+  var hasFail = false
+  for (var i = 0; i < checks.length; i++) {
+    var check = checks[i] || {}
+    var status = normalizeText(check.status).toLowerCase()
+    if (status === "fail") {
+      hasFail = true
+      missing.push(normalizeText(check.name || check.message || "dependency"))
+    }
+  }
+
+  var available = parsed.available !== undefined ? !!parsed.available : !hasFail
   if (parsed.ok === false || parsed.installed === false || parsed.ready === false) available = false
-  if (missing.length > 0) available = false
+  if (hasFail) available = false
+  if (missing.length > 0 && hasFail) available = false
 
   var message = normalizeText(parsed.message || parsed.error || parsed.summary || parsed.diagnostic)
   if (message === "" && !available) message = "FluxCast is not ready."
+  if (message === "" && parsed.wfd_candidate === false) message = normalizeText(parsed.summary || "Miracast/WFD is not confirmed yet.")
+
+  var version = normalizeText(parsed.version || parsed.fluxcastVersion || "")
+  if (version === "") {
+    for (var j = 0; j < checks.length; j++) {
+      var runtime = checks[j] || {}
+      if (normalizeText(runtime.name).toLowerCase() === "python") {
+        version = normalizeText(runtime.detail || runtime.message)
+        break
+      }
+    }
+  }
 
   var hint = normalizeText(parsed.hint || parsed.recovery || parsed.recommendation)
-  if (hint === "" && !available) hint = missing.length > 0 ? "Install the missing dependency, then retry." : "Check the FluxCast log or reinstall FluxCast." 
+  if (hint === "" && !available) hint = missing.length > 0 ? "Install the missing dependency, then retry." : "Check the FluxCast log or reinstall FluxCast."
+  if (hint === "" && parsed.wfd_candidate === false) hint = "Fix the warn/fail rows in doctor output, then retry scan."
 
   return {
     available: available,
-    version: normalizeText(parsed.version || parsed.fluxcastVersion || ""),
+    version: version,
     message: message,
     missing: missing,
     hint: hint
@@ -209,11 +240,54 @@ function parseDevicesPayload(raw) {
   }
 }
 
+function parseWfdScanOutput(raw) {
+  var text = String(raw || "")
+  var devices = []
+  var lines = text.split(/\r?\n/)
+  var peerRe = /^\s*\[(\d+)\]\s+([0-9a-fA-F:]{17})(.*)$/
+
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(peerRe)
+    if (!match) continue
+    var index = match[1]
+    var address = match[2]
+    var tail = normalizeText(match[3]).replace(/\s+via\s+.*$/i, "")
+    devices.push({
+      name: tail !== "" ? tail : address,
+      address: address,
+      selector: index,
+      protocol: "wfd"
+    })
+  }
+
+  var error = ""
+  var errorMatch = text.match(/ERROR:\s*(.+)/)
+  if (errorMatch) error = normalizeText(errorMatch[1])
+
+  return { devices: devices, error: error, hint: "" }
+}
+
 function normalizeDevices(raw, exitCode, stderrText) {
+  var combined = normalizeText(raw)
+  if (normalizeText(stderrText) !== "") combined = combined + "\n" + normalizeText(stderrText)
+
   var parsed = parseDevicesPayload(raw)
-  if (exitCode !== 0 && parsed.error === "") parsed.error = processFailureMessage("scan", exitCode, stderrText)
-  if (exitCode !== 0 && parsed.hint === "") parsed.hint = recoveryHint("scan")
-  return { devices: parsed.devices, raw: normalizeText(raw), error: parsed.error, hint: parsed.hint }
+  if (parsed.devices.length > 0) {
+    if (exitCode !== 0 && parsed.error === "") parsed.error = processFailureMessage("scan", exitCode, stderrText)
+    if (exitCode !== 0 && parsed.hint === "") parsed.hint = recoveryHint("scan")
+    return { devices: parsed.devices, raw: normalizeText(raw), error: parsed.error, hint: parsed.hint }
+  }
+
+  var scan = parseWfdScanOutput(combined)
+  var error = scan.error
+  if (exitCode !== 0 && error === "") error = processFailureMessage("scan", exitCode, stderrText)
+  var hint = scan.hint
+  if (exitCode !== 0 && hint === "") hint = recoveryHint("scan")
+  if (exitCode === 0 && scan.devices.length === 0 && error === "") {
+    error = "No Wi-Fi Direct peers found."
+    hint = "Put the TV into Screen Share or Wireless Display mode, then scan again."
+  }
+  return { devices: scan.devices, raw: combined, error: error, hint: hint }
 }
 
 function parseMonitorsPayload(raw) {
@@ -242,11 +316,44 @@ function parseMonitorsPayload(raw) {
   }
 }
 
+function parseHyprctlMonitorsPayload(raw) {
+  var parsed = safeJson(raw)
+  if (!parsed || !Array.isArray(parsed)) {
+    return {
+      monitors: [],
+      error: "Could not read monitors from hyprctl.",
+      hint: "Make sure Hyprland is running, then refresh."
+    }
+  }
+
+  var monitors = []
+  for (var i = 0; i < parsed.length; i++) {
+    var monitor = parsed[i] || {}
+    monitors.push({
+      name: normalizeText(monitor.name),
+      selector: normalizeText(monitor.name),
+      address: "",
+      description: normalizeText(monitor.description),
+      width: Number(monitor.width || 0),
+      height: Number(monitor.height || 0)
+    })
+  }
+
+  return { monitors: monitors, error: "", hint: "" }
+}
+
 function normalizeMonitors(raw, exitCode, stderrText) {
   var parsed = parseMonitorsPayload(raw)
-  if (exitCode !== 0 && parsed.error === "") parsed.error = processFailureMessage("monitors", exitCode, stderrText)
-  if (exitCode !== 0 && parsed.hint === "") parsed.hint = recoveryHint("monitors")
-  return { monitors: parsed.monitors, raw: normalizeText(raw), error: parsed.error, hint: parsed.hint }
+  if (parsed.monitors.length > 0) {
+    if (exitCode !== 0 && parsed.error === "") parsed.error = processFailureMessage("monitors", exitCode, stderrText)
+    if (exitCode !== 0 && parsed.hint === "") parsed.hint = recoveryHint("monitors")
+    return { monitors: parsed.monitors, raw: normalizeText(raw), error: parsed.error, hint: parsed.hint }
+  }
+
+  var hypr = parseHyprctlMonitorsPayload(raw)
+  if (exitCode !== 0 && hypr.error === "") hypr.error = processFailureMessage("monitors", exitCode, stderrText)
+  if (exitCode !== 0 && hypr.hint === "") hypr.hint = recoveryHint("monitors")
+  return { monitors: hypr.monitors, raw: normalizeText(raw), error: hypr.error, hint: hypr.hint }
 }
 
 function parseStatusPayload(raw) {
@@ -294,14 +401,29 @@ function elapsedSeconds(startedAt, fallbackSeconds) {
   return Math.max(0, Math.floor(elapsed))
 }
 
-function buildStartArgs(protocol, device, monitor, settings) {
-  var args = ["fluxcast", "--start", "--protocol", normalizeProtocol(protocol)]
+function buildScanArgs(protocol, fluxcastBin) {
+  var binary = normalizeText(fluxcastBin) || "fluxcast"
+  if (normalizeProtocol(protocol) === "wfd") return [binary, "--wfd-scan"]
+  return null
+}
+
+function buildStartArgs(protocol, device, monitor, settings, fluxcastBin) {
+  var binary = normalizeText(fluxcastBin) || "fluxcast"
+  var proto = fluxcastProtocol(protocol)
+  var args = [binary, "--protocol", proto]
   var deviceKeyValue = deviceKey(device)
   var monitorKeyValue = monitorKey(monitor)
-  if (deviceKeyValue !== "") {
-    args.push("--device")
+
+  if (proto === "wfd") {
+    if (deviceKeyValue !== "") {
+      args.push("--wfd-peer")
+      args.push(deviceKeyValue)
+    }
+  } else if (deviceKeyValue !== "") {
+    args.push("--device-name")
     args.push(deviceKeyValue)
   }
+
   if (monitorKeyValue !== "") {
     args.push("--monitor")
     args.push(monitorKeyValue)
@@ -321,16 +443,13 @@ function buildStartArgs(protocol, device, monitor, settings) {
   }
 
   var backend = normalizeText(options["wfd-capture-backend"])
-  if (normalizeProtocol(protocol) === "wfd" && backend !== "") {
+  if (proto === "wfd" && backend !== "") {
     args.push("--wfd-capture-backend")
     args.push(backend)
   }
 
-  if (normalizeProtocol(protocol) === "wfd" && settingBool(options["wfd-no-audio"], false)) args.push("--wfd-no-audio")
-  if (normalizeText(options.profile) !== "") {
-    args.push("--profile")
-    args.push(normalizeText(options.profile))
-  }
+  if (proto === "wfd" && settingBool(options["wfd-no-audio"], false)) args.push("--wfd-no-audio")
+  if (proto === "wfd" && settingBool(options["wfd-aosp-pmt-pid"], false)) args.push("--wfd-aosp-pmt-pid")
 
   return args
 }
@@ -373,7 +492,11 @@ if (typeof module !== "undefined") {
     normalizeMonitors: normalizeMonitors,
     normalizeStatus: normalizeStatus,
     elapsedSeconds: elapsedSeconds,
+    fluxcastProtocol: fluxcastProtocol,
+    buildScanArgs: buildScanArgs,
     buildStartArgs: buildStartArgs,
+    parseWfdScanOutput: parseWfdScanOutput,
+    parseHyprctlMonitorsPayload: parseHyprctlMonitorsPayload,
     processFailureMessage: processFailureMessage,
     recoveryHint: recoveryHint
   }

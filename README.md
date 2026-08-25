@@ -4,7 +4,7 @@ Oma Cast is an Omarchy `bar-widget` plugin for controlling FluxCast screen mirro
 
 ## Dependency
 
-- `fluxcast`
+- `fluxcast` (tested with v0.2.3)
 
 ## Plugin contract
 
@@ -15,6 +15,21 @@ Oma Cast is an Omarchy `bar-widget` plugin for controlling FluxCast screen mirro
 - `oma-cast.start`
 - `oma-cast.stop`
 - `oma-cast.refresh`
+
+## FluxCast integration
+
+This plugin targets the **installed FluxCast CLI**, not a hypothetical JSON control API.
+
+| Action | Command |
+|---|---|
+| Doctor | `fluxcast --doctor-json` |
+| Scan (WFD) | `fluxcast --wfd-scan` |
+| Monitors | `hyprctl monitors -j` |
+| Start | long-running `fluxcast --protocol …` |
+| Stop | terminate the session process started by oma-cast |
+| Status | tracked locally from the oma-cast session process |
+
+DLNA and Chromecast discovery still require **Launch tray** (`fluxcast --tray`) because FluxCast does not expose scan JSON for those protocols yet.
 
 ## Config
 

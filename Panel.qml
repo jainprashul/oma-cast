@@ -15,6 +15,7 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property string home: Quickshell.env("HOME") || ""
+  readonly property string fluxcastBin: home !== "" ? home + "/.local/bin/fluxcast" : "fluxcast"
 
   property bool fluxcastAvailable: false
   property string fluxcastVersion: ""
@@ -38,7 +39,6 @@ Panel {
   property bool stopInFlight: false
   property bool doctorInFlight: false
   property bool monitorsInFlight: false
-  property bool statusInFlight: false
   property bool scanQueued: false
   property bool refreshQueued: false
   property bool trayLaunching: false
@@ -46,6 +46,7 @@ Panel {
   property bool monitorWarningShown: false
   property bool protocolWarningShown: false
   property bool dependencyNotificationShown: false
+  property bool stopRequested: false
   property string doctorRaw: ""
   property string statusRaw: ""
   property string devicesRaw: ""
@@ -116,12 +117,12 @@ Panel {
   function launchTray() {
     if (!launchTrayFallback || trayLaunching) return
     trayLaunching = true
-    trayProc.command = ["fluxcast", "--tray"]
+    trayProc.command = [fluxcastBin, "--tray"]
     trayProc.running = true
   }
 
   function refresh() {
-    if (doctorInFlight || monitorsInFlight || statusInFlight) {
+    if (doctorInFlight || monitorsInFlight) {
       refreshQueued = true
       return
     }
@@ -129,28 +130,47 @@ Panel {
     refreshQueued = false
     requestDoctor()
     requestMonitors()
-    requestStatus()
+    applyLocalStatus()
   }
 
   function requestDoctor() {
     if (doctorInFlight) return
     doctorInFlight = true
-    doctorProc.command = ["fluxcast", "--doctor-json"]
+    doctorProc.command = [fluxcastBin, "--doctor-json"]
     doctorProc.running = true
   }
 
   function requestMonitors() {
     if (monitorsInFlight) return
     monitorsInFlight = true
-    monitorProc.command = ["fluxcast", "--monitors", "--json"]
+    monitorProc.command = ["hyprctl", "monitors", "-j"]
     monitorProc.running = true
   }
 
-  function requestStatus() {
-    if (statusInFlight) return
-    statusInFlight = true
-    statusProc.command = ["fluxcast", "--status", "--json"]
-    statusProc.running = true
+  function applyLocalStatus() {
+    var running = startProc.running === true
+    var previousState = currentState
+
+    if (!fluxcastAvailable && !running) {
+      if (previousState !== "error") currentState = "unavailable"
+      return
+    }
+
+    if (running) {
+      errorState = false
+      if (currentState !== "casting" && currentState !== "connecting") currentState = "connecting"
+      elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, elapsedSeconds)
+      return
+    }
+
+    if (previousState === "casting" || previousState === "connecting") {
+      currentTarget = ""
+      currentMonitor = ""
+      currentPid = 0
+      elapsedSeconds = 0
+    }
+    if (!errorState && !startInFlight && !scanInFlight)
+      currentState = fluxcastAvailable ? "idle" : "unavailable"
   }
 
   function scan() {
@@ -158,19 +178,28 @@ Panel {
       scanQueued = true
       return
     }
+
+    var protocol = selectedProtocol || configuredProtocol || "wfd"
+    var args = Model.buildScanArgs(protocol, fluxcastBin)
+    if (!args) {
+      setError("Native scan is only available for Miracast / WFD.", "Use Launch tray for DLNA or Chromecast discovery.")
+      if (launchTrayFallback) launchTray()
+      return
+    }
+
     scanInFlight = true
     scanQueued = false
-    var protocol = selectedProtocol || configuredProtocol || "wfd"
-    scanProc.command = ["fluxcast", "--scan", "--protocol", protocol, "--json"]
+    currentState = "scanning"
+    scanProc.command = args
     scanProc.running = true
   }
 
   function stop() {
     if (stopInFlight) return
-    if (currentState !== "casting" && currentState !== "connecting") return
+    if (!startProc.running && currentState !== "casting" && currentState !== "connecting") return
     stopInFlight = true
-    stopProc.command = ["fluxcast", "--stop"]
-    stopProc.running = true
+    stopRequested = true
+    startProc.running = false
   }
 
   function pickBestDevice() {
@@ -221,7 +250,10 @@ Panel {
 
     clearError()
     startInFlight = true
-    var args = Model.buildStartArgs(selectedProtocol || configuredProtocol || "wfd", device, monitor, root.settings)
+    currentTarget = Model.deviceLabel(device)
+    currentMonitor = Model.monitorLabel(monitor)
+    currentProtocol = selectedProtocol || configuredProtocol || "wfd"
+    var args = Model.buildStartArgs(currentProtocol, device, monitor, root.settings, fluxcastBin)
     startProc.command = args
     startProc.running = true
   }
@@ -247,7 +279,7 @@ Panel {
         launchTray()
       }
     }
-    if (refreshQueued && !doctorInFlight && !monitorsInFlight && !statusInFlight) Qt.callLater(refresh)
+    if (refreshQueued && !doctorInFlight && !monitorsInFlight) Qt.callLater(refresh)
   }
 
   function onMonitorResult(parsed, exitCode, stderrText) {
@@ -263,44 +295,11 @@ Panel {
     if (configuredMonitor !== "" && !selectedMonitor && !monitorWarningShown) {
       monitorWarningShown = true
       setError("Configured monitor is not available.", "Select a monitor from the list and start again.")
+    } else if (configuredMonitor !== "" && selectedMonitor && lastError === "Configured monitor is not available.") {
+      clearError()
     }
     if (!selectedMonitorKey && monitors.length > 0) selectedMonitorKey = Model.monitorKey(monitors[0])
-    if (refreshQueued && !doctorInFlight && !monitorsInFlight && !statusInFlight) Qt.callLater(refresh)
-  }
-
-  function onStatusResult(parsed, exitCode, stderrText) {
-    statusInFlight = false
-    var result = Model.normalizeStatus(parsed, exitCode, stderrText)
-    var previousState = currentState
-    if (result.state !== "") currentState = result.state
-    currentProtocol = result.protocol || currentProtocol || selectedProtocol
-    currentTarget = result.target
-    currentMonitor = result.monitor
-    currentPid = result.pid
-    if (result.state === "casting") {
-      errorState = false
-      if (previousState !== "casting") sessionStartedAt = new Date()
-      if (result.startedAtMs > 0) sessionStartedAt = new Date(result.startedAtMs)
-      elapsedSeconds = Model.elapsedSeconds(sessionStartedAt, result.elapsedSeconds)
-      if (previousState !== "casting" && showNotifications) notify("Casting started", currentTarget !== "" ? currentTarget : "FluxCast session active")
-    } else if (result.state === "idle") {
-      elapsedSeconds = 0
-      if (previousState === "casting" && showNotifications) notify("Casting stopped", currentTarget !== "" ? currentTarget : "FluxCast session ended")
-      currentTarget = ""
-      currentMonitor = ""
-      currentPid = 0
-    } else if (result.state === "error") {
-      errorState = true
-      currentState = "error"
-      if (showNotifications && previousState !== "error") notify("Casting failed", Model.normalizeText(result.error || "FluxCast reported an error"))
-    }
-    if (result.error !== "") {
-      errorState = true
-      currentState = "error"
-      setError(result.error, result.hint)
-    }
-    if (result.state === "casting") clearError()
-    if (refreshQueued && !doctorInFlight && !monitorsInFlight && !statusInFlight) Qt.callLater(refresh)
+    if (refreshQueued && !doctorInFlight && !monitorsInFlight) Qt.callLater(refresh)
   }
 
   function onScanResult(parsed, exitCode, stderrText) {
@@ -312,38 +311,54 @@ Panel {
       errorState = true
       currentState = "error"
       setError(result.error, result.hint)
+    } else if (!startProc.running) {
+      currentState = fluxcastAvailable ? "idle" : "unavailable"
     }
     if (!selectedDevice && devices.length > 0) selectedDeviceKey = Model.deviceKey(devices[0])
     if (scanQueued) Qt.callLater(scan)
   }
 
-  function onStartFinished(exitCode, stderrText, stdoutText) {
+  function onCastStarted() {
     startInFlight = false
+    errorState = false
+    currentState = "connecting"
+    sessionStartedAt = new Date()
+    clearError()
+    connectingTimer.restart()
+  }
+
+  function onCastExited(exitCode, stderrText) {
+    var wasStop = stopRequested
+    stopRequested = false
+    startInFlight = false
+    stopInFlight = false
+    connectingTimer.stop()
+
+    if (wasStop) {
+      errorState = false
+      currentState = "idle"
+      currentTarget = ""
+      currentMonitor = ""
+      currentPid = 0
+      elapsedSeconds = 0
+      if (showNotifications) notify("Casting stopped", "FluxCast session ended")
+      applyLocalStatus()
+      return
+    }
+
     if (exitCode !== 0) {
       errorState = true
       currentState = "error"
-      setError(Model.processFailureMessage("start", exitCode, stderrText || stdoutText), Model.recoveryHint("start"))
+      setError(Model.processFailureMessage("start", exitCode, stderrText), Model.recoveryHint("start"))
       if (showNotifications) notify("Casting failed", lastError)
       return
     }
-    currentState = "connecting"
-    clearError()
-    requestStatus()
-  }
 
-  function onStopFinished(exitCode, stderrText) {
-    stopInFlight = false
-    if (exitCode !== 0) {
-      errorState = true
-      currentState = "error"
-      setError(Model.processFailureMessage("stop", exitCode, stderrText), Model.recoveryHint("stop"))
-    }
-    currentState = "idle"
+    currentState = fluxcastAvailable ? "idle" : "unavailable"
     currentTarget = ""
     currentMonitor = ""
     currentPid = 0
     elapsedSeconds = 0
-    requestStatus()
   }
 
   function openLog() {
@@ -366,6 +381,25 @@ Panel {
     }
     if (configuredMonitor !== "") selectedMonitorKey = configuredMonitor
     monitorWarningShown = false
+  }
+
+  function debugState() {
+    return JSON.stringify({
+      fluxcastAvailable: fluxcastAvailable,
+      fluxcastBin: fluxcastBin,
+      currentState: currentState,
+      lastError: lastError,
+      lastErrorHint: lastErrorHint,
+      devices: devices.length,
+      monitors: monitors.length,
+      selectedDeviceKey: selectedDeviceKey,
+      selectedMonitorKey: selectedMonitorKey,
+      scanInFlight: scanInFlight,
+      startInFlight: startInFlight,
+      startRunning: startProc.running,
+      doctorInFlight: doctorInFlight,
+      monitorsInFlight: monitorsInFlight
+    })
   }
 
   function open() {
@@ -400,6 +434,18 @@ Panel {
   onSettingsChanged: syncFromSettings()
 
   Timer {
+    id: connectingTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      if (startProc.running && root.currentState === "connecting") {
+        root.currentState = "casting"
+        if (root.showNotifications) root.notify("Casting started", root.currentTarget !== "" ? root.currentTarget : "FluxCast session active")
+      }
+    }
+  }
+
+  Timer {
     id: elapsedTimer
     interval: 1000
     repeat: true
@@ -413,13 +459,13 @@ Panel {
     repeat: true
     running: root.opened || root.currentState === "casting" || root.currentState === "connecting" || root.currentState === "scanning"
     triggeredOnStart: false
-    onTriggered: root.requestStatus()
+    onTriggered: root.applyLocalStatus()
   }
 
   Process {
     id: doctorProc
     property string stderrText: ""
-    command: ["fluxcast", "--doctor-json"]
+    command: [root.fluxcastBin, "--doctor-json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.doctorRaw = String(text || "")
@@ -452,23 +498,6 @@ Panel {
   }
 
   Process {
-    id: statusProc
-    property string stderrText: ""
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.statusRaw = String(text || "")
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: statusProc.stderrText = String(text || "")
-    }
-    onExited: function(exitCode) {
-      root.onStatusResult(statusRaw, exitCode, stderrText)
-      stderrText = ""
-    }
-  }
-
-  Process {
     id: scanProc
     property string stderrText: ""
     stdout: StdioCollector {
@@ -488,29 +517,14 @@ Panel {
   Process {
     id: startProc
     property string stderrText: ""
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.statusRaw = String(text || "")
-    }
     stderr: StdioCollector {
-      waitForEnd: true
       onStreamFinished: startProc.stderrText = String(text || "")
     }
-    onExited: function(exitCode) {
-      root.onStartFinished(exitCode, stderrText, statusRaw)
-      stderrText = ""
-    }
-  }
-
-  Process {
-    id: stopProc
-    property string stderrText: ""
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: stopProc.stderrText = String(text || "")
+    onRunningChanged: {
+      if (running && root.startInFlight) root.onCastStarted()
     }
     onExited: function(exitCode) {
-      root.onStopFinished(exitCode, stderrText)
+      root.onCastExited(exitCode, stderrText)
       stderrText = ""
     }
   }
@@ -594,8 +608,9 @@ Panel {
             model: root.protocolOptions
 
             delegate: Button {
-              checkable: true
-              checked: root.selectedProtocol === modelData.id
+              selected: root.selectedProtocol === modelData.id
+              bordered: true
+              foreground: root.barForeground
               text: modelData.label
               onClicked: {
                 root.selectedProtocol = modelData.id
@@ -628,8 +643,10 @@ Panel {
 
               delegate: Button {
                 width: parent.width
-                checkable: true
-                checked: Model.deviceKey(modelData) === root.selectedDeviceKey
+                leftAlign: true
+                selected: Model.deviceKey(modelData) === root.selectedDeviceKey
+                bordered: true
+                foreground: root.barForeground
                 text: Model.deviceLabel(modelData)
                 onClicked: root.selectedDeviceKey = Model.deviceKey(modelData)
               }
@@ -671,8 +688,10 @@ Panel {
 
               delegate: Button {
                 width: parent.width
-                checkable: true
-                checked: Model.monitorKey(modelData) === root.selectedMonitorKey
+                leftAlign: true
+                selected: Model.monitorKey(modelData) === root.selectedMonitorKey
+                bordered: true
+                foreground: root.barForeground
                 text: Model.monitorLabel(modelData)
                 onClicked: {
                   root.selectedMonitorKey = Model.monitorKey(modelData)

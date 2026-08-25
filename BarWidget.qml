@@ -14,7 +14,7 @@ BarWidget {
   readonly property string currentTarget: panelLoader.item ? panelLoader.item.currentTarget : ""
   readonly property string currentProtocol: panelLoader.item ? panelLoader.item.currentProtocol : "wfd"
   readonly property int currentElapsedSeconds: panelLoader.item ? panelLoader.item.elapsedSeconds : 0
-  readonly property bool visibleInBar: opened || (displayState !== "unavailable" && displayState !== "idle")
+  readonly property bool visibleInBar: opened || displayState !== "unavailable"
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()
@@ -42,6 +42,11 @@ BarWidget {
 
   function stop() {
     if (panelLoader.item && typeof panelLoader.item.stop === "function") panelLoader.item.stop()
+  }
+
+  function statusJson() {
+    if (!panelLoader.item || typeof panelLoader.item.debugState !== "function") return "{\"ok\":false}"
+    return panelLoader.item.debugState()
   }
 
   function injectPanel() {
@@ -80,6 +85,7 @@ BarWidget {
     function start(): void { root.start() }
     function stop(): void { root.stop() }
     function refresh(): void { root.refresh() }
+    function status(): string { return root.statusJson() }
   }
 
   BarIconButton {
